@@ -7,8 +7,8 @@ export type UUID = string;
 export interface CreateMeetingRequest {
     title: string;
     allDay: boolean;
-    start: string;
-    end: string;
+    start: string | Date;
+    end: string | Date;
     projectId?: number | null;
     participantAccountIds?: number[];
     teamIds?: number[];
@@ -24,8 +24,8 @@ export interface CreateMeetingResponse {
 export interface UpdateMeetingRequest {
     title?: string;
     allDay?: boolean;
-    start?: string;
-    end?: string;
+    start?: string | Date;
+    end?: string | Date;
     teamIds?: number[];
     participantAccountIds?: number[];
     meetingVersion?: number;
@@ -47,19 +47,19 @@ export interface ReadMeetingResponse {
     start: string;
     end: string;
 
-    creatorAccountId?: number;      // [NEW] 서버 폼 반영 (optional로 안전)
-    creatorNickname?: string;       // [NEW]
-    createdAt?: string;             // [NEW]
+    creatorAccountId?: number;
+    creatorNickname?: string;
+    createdAt?: string;
     updatedAt?: string;
 
     // 상세/버전
-    noteContent?: string;           // [CHANGED] 서버 필드명에 맞춤
+    noteContent?: string;
     meetingVersion?: number;
     noteVersion?: number;
 
     // 참가자/팀 (서버가 map 리스트로 줌)
-    participantList?: Array<Record<string, any>>; // [NEW]
-    teamList?: Array<Record<string, any>>;        // [NEW]
+    participantList?: Array<Record<string, any>>;
+    teamList?: Array<Record<string, any>>;
 }
 
 // 목록 조회

@@ -17,6 +17,8 @@ type Props = {
     setLinkOpen: (v: boolean) => void;
 
     participants: string;
+
+    canPersistBoards?: boolean; // [NEW] 서버에 존재 확인(200)된 경우에만 보드 API 호출 허용
 };
 
 export default function Content({
@@ -26,6 +28,7 @@ export default function Content({
                                     links, setLinks,
                                     linkOpen, setLinkOpen,
                                     participants,
+                                    canPersistBoards = false, // [NEW] 기본값: 호출 차단
                                 }: Props) {
 
     // 참가자 파싱(유지)
@@ -80,17 +83,17 @@ export default function Content({
 
     // 서버 템플릿으로 보드 초기화
     function initBoardFromServerTemplate(tpl: MeetingTemplate) {
-        // BoardsPanel이 column.id를 필요로 할 수 있으니, 없으면 임시 id 생성
+        // BoardsPanel이 column.id를 필요로 할 수 있으니, 없으면 안정적 id 생성
         const columns = (tpl.columns ?? []).map((c, i) => ({
-            id: `c${i + 1}`,     // 안정적 id 부여 (백엔드 템플릿엔 보통 없음)
+            id: `c${i + 1}`,
             key: c.key,
             label: c.label,
             badgeClass: c.badgeClass ?? null,
-            users: [],           // 빈 보드로 시작 (서버 스냅샷 스키마 호환)
+            users: [],
         }));
 
         const payload = {
-            template: tpl.id,    // 백엔드 템플릿 id 그대로 저장
+            template: tpl.id,
             title: tpl.title,
             columns,
             ts: Date.now(),
@@ -112,14 +115,12 @@ export default function Content({
             if (!ok) return;
         }
 
-        // 목록이 로드되어 있다면 목록에서 찾아서 즉시 적용
         const found = templates?.find(t => t.id === tplId);
         if (found) {
             initBoardFromServerTemplate(found);
             return;
         }
 
-        // 목록이 비어있거나 못 찾았으면 단건 조회로 보정
         (async () => {
             try {
                 const one = await meetingApi.getMeetingTemplate(tplId);
@@ -161,7 +162,11 @@ export default function Content({
             </div>
 
             {/* 보드 */}
-            <BoardsPanel publicId={publicId} participantsStr={participants} />
+            <BoardsPanel
+                publicId={publicId}
+                participantsStr={participants}
+                canPersistBoards={canPersistBoards}
+            />
 
             {/* 템플릿 — 보드 없을 때 항상 노출(초기 포함) */}
             {showTemplates && (

@@ -19,7 +19,6 @@ const COLUMN_STYLE: Record<ColumnKey, { label: string; badgeClass: string }> = {
     learned: { label: "배운 점",    badgeClass: "bg-[#EAE7FF] text-[#4B3DB8]" },
 };
 
-// 색 팔레트
 const COLOR_PALETTE = [
     { id: "gray",   label: "회색",   bg: "bg-[#ECEFF3]", text: "text-[#374151]" },
     { id: "orange", label: "주황색", bg: "bg-[#FFE1C7]", text: "text-[#9A4E10]" },
@@ -39,23 +38,29 @@ function pickPaletteForLabel(label: string) {
     return pool[h % pool.length];
 }
 
-export default function BoardsPanel({ publicId, participantsStr }: { publicId: string; participantsStr: string }) {
+// [NEW] canPersistBoards: 서버 publicId 확정 시에만 서버와 통신
+export default function BoardsPanel({
+                                        publicId,
+                                        participantsStr,
+                                        canPersistBoards = false,         // [NEW]
+                                    }: {
+    publicId: string;
+    participantsStr: string;
+    canPersistBoards?: boolean;      // [NEW]
+}) {
     const participants = useMemo(() => parseParticipants(participantsStr), [participantsStr]);
 
     const [templateTitle, setTemplateTitle] = useState<string>("");
     const [columns, setColumns] = useState<Column[]>([]);
     const [openUsers, setOpenUsers] = useState<Record<string, boolean>>({});
 
-    // [NEW] 서버 템플릿 id 보존 (Content에서 boards:init detail.template로 전달됨)
     const templateIdRef = useRef<string | null>(null);
 
-    // 팝오버/프리뷰
     const [addOpen, setAddOpen] = useState(false);
     const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
     const addBtnRef = useRef<HTMLButtonElement | null>(null);
     const [draftLabel, setDraftLabel] = useState<string>("");
 
-    // [NEW] ETag/updatedAt 캐시 — 서버 응답 헤더/필드 재사용
     const [boardEtag, setBoardEtag] = useState<string | null>(null);
     const etagKey = `boardEtag:${publicId}`;
 
@@ -64,28 +69,29 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
         try { window.dispatchEvent(new Event(columns.length > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
     }, [columns]);
 
-    // [NEW] 초기 로드: 서버 보드 스냅샷 GET (If-None-Match 지원)
+    // 초기 로드: 서버 보드 스냅샷 GET (canPersistBoards=true일 때만)
     useEffect(() => {
         let alive = true;
         (async () => {
+            if (!publicId || publicId === "new") return; // [NEW]
+            if (!canPersistBoards) return;               // [NEW]
+
             try {
-                const prev = localStorage.getItem(etagKey);
-                const res = await meetingApi.getMeetingBoard(publicId, prev || undefined); // 200 or 304
+                const prev = localStorage.getItem(etagKey) || undefined;
+                const res = await meetingApi.getMeetingBoard(publicId, prev); // 200 or 304
                 if (!alive) return;
+
                 if (res?.status === 304) {
-                    // 최신 그대로
                     setBoardEtag(prev ?? null);
                     return;
                 }
                 if (res?.status === 200 && res.data) {
                     const { boardSnapshot, updatedAt } = res.data as any;
-                    // snapshot → local state 복원
+
                     if (boardSnapshot) {
-                        // template/title
                         templateIdRef.current = boardSnapshot.template ?? null;
                         setTemplateTitle(boardSnapshot.title ?? "");
 
-                        // columns
                         const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => ({
                             id: c.id || `c${i + 1}`,
                             key: c.key,
@@ -105,24 +111,21 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
                         setOpenUsers({});
                     }
 
-                    // ETag/updatedAt 캐시
                     const et = res.headers?.etag || updatedAt || null;
                     setBoardEtag(et);
                     if (et) localStorage.setItem(etagKey, et);
 
-                    // 상태 이벤트
                     try { window.dispatchEvent(new Event(colsLength(boardSnapshot) > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
                 }
             } catch {
-                // 실패 시 조용히 패스 (빈 보드로)
+                // 조용히 패스
             }
         })();
         return () => { alive = false; };
-        // publicId가 바뀌면 다시 로드
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [publicId]);
+    }, [publicId, canPersistBoards]); // [CHANGED]
 
-    // [NEW] Content → boards:init 이벤트로 템플릿 적용 시 서버 상태로 초기화
+    // boards:init → 로컬 상태 초기화
     useEffect(() => {
         function onInit(e: any) {
             const detail = e?.detail as {
@@ -132,7 +135,7 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
             };
             if (!detail) return;
 
-            templateIdRef.current = detail.template ?? null; // [NEW] 서버 템플릿 id 보존
+            templateIdRef.current = detail.template ?? null;
             setTemplateTitle(detail.title || "");
 
             const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => ({
@@ -235,16 +238,15 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
         }
     }
 
-    // [NEW] 서버 업서트: columns/template/title → snapshot PUT (디바운스)
+    // 서버 업서트: canPersistBoards=true일 때만 PUT
     useEffect(() => {
-        // 컬럼이 하나도 없고 템플릿도 없으면 업서트 안 함
-        if (!publicId) return;
+        if (!publicId || publicId === "new") return; // [NEW]
+        if (!canPersistBoards) return;               // [NEW]
 
-        // 디바운스 600ms — 기존 autosave 리듬과 동일화
         const t = window.setTimeout(async () => {
             try {
                 const snapshot = {
-                    template: templateIdRef.current,        // 서버 템플릿 id (없으면 null로 저장됨)
+                    template: templateIdRef.current,
                     title: templateTitle || "",
                     columns: columns.map(c => ({
                         id: c.id,
@@ -257,15 +259,13 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
                             items: u.items.map(it => ({
                                 id: it.id,
                                 content: it.content,
-                                createdAt: it.createdAt,          // number(ms)
+                                createdAt: it.createdAt,
                             })),
                         })),
                     })),
                 };
 
-                // PUT /meeting/{publicId}/board
                 const res = await meetingApi.putMeetingBoard(publicId, { snapshot });
-                // 200 OK + ETag(or updatedAt)
                 const { updatedAt } = res.data as any;
                 const et = res.headers?.etag || updatedAt || null;
                 if (et) {
@@ -273,13 +273,13 @@ export default function BoardsPanel({ publicId, participantsStr }: { publicId: s
                     localStorage.setItem(etagKey, et);
                 }
             } catch {
-                // 조용히 무시 (다음 편집 시 재시도)
+                // 다음 편집 시 재시도
             }
         }, 600);
 
         return () => window.clearTimeout(t);
-        // templateTitle/columns 변경 시 업서트
-    }, [publicId, templateTitle, columns]); // eslint-disable-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [publicId, canPersistBoards, templateTitle, columns]); // [CHANGED]
 
     return (
         <div className="mt-6">
@@ -355,7 +355,6 @@ function ColumnCard({
     const badgeClass = data.badgeClass ?? fallback.badgeClass;
     const total = data.users.reduce((acc, u) => acc + u.items.length, 0);
 
-    // 라벨/색 편집 팝오버
     const [menuOpen, setMenuOpen] = useState(false);
     const [menuX, setMenuX] = useState(0);
     const [menuY, setMenuY] = useState(0);
@@ -622,7 +621,13 @@ function UserSection({
             <span className="text-[12px] text-[#9CA3AF]">{count}</span>
           </span>
                 </button>
-                <button type="button" onClick={onRemove} className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1 text-[12px] text-[#DC2626] hover:bg-[#FFF1F2]">삭제</button>
+                <button
+                    type="button"
+                    onClick={onRemove}
+                    className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1 text-[12px] text-[#DC2626] hover:bg-[#FFF1F2]"
+                >
+                    삭제
+                </button>
             </div>
 
             {isOpen && (
@@ -632,13 +637,23 @@ function UserSection({
                             <div className="whitespace-pre-wrap text-[13px] text-[#111827]">{it.content}</div>
                             <div className="mt-1 flex items-center justify-between">
                                 <div className="text-[11px] text-[#94A3B8]">{new Date(it.createdAt).toLocaleString()}</div>
-                                <button type="button" onClick={() => onRemoveItem(it.id)} className="rounded-md border border-[#EEF2F7] bg-white px-2 py-1 text-[11px] text-[#DC2626] hover:bg-[#FFF1F2]">삭제</button>
+                                <button
+                                    type="button"
+                                    onClick={() => onRemoveItem(it.id)}
+                                    className="rounded-md border border-[#EEF2F7] bg-white px-2 py-1 text-[11px] text-[#DC2626] hover:bg-[#FFF1F2]"
+                                >
+                                    삭제
+                                </button>
                             </div>
                         </div>
                     ))}
 
                     {!adding && (
-                        <button type="button" onClick={() => setAdding(true)} className="w-full rounded-md border-2 border-dashed border-[#D9E2F2] px-3 py-2 text-left text-[13px] text-[#7B91F8]">
+                        <button
+                            type="button"
+                            onClick={() => setAdding(true)}
+                            className="w-full rounded-md border-2 border-dashed border-[#D9E2F2] px-3 py-2 text-left text-[13px] text-[#7B91F8]"
+                        >
                             + 내용 추가
                         </button>
                     )}
@@ -654,8 +669,20 @@ function UserSection({
                                 onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add(); } }}
                             />
                             <div className="flex items-center gap-2">
-                                <button type="button" onClick={add} className="rounded-md bg-[#7B91F8] px-3 py-2 text-[13px] text-white">추가</button>
-                                <button type="button" onClick={() => { setAdding(false); setText(""); }} className="rounded-md border border-[#E5E7EB] bg-white px-3 py-2 text-[13px] hover:bg-[#F8FAFC]">취소</button>
+                                <button
+                                    type="button"
+                                    onClick={add}
+                                    className="rounded-md bg-[#7B91F8] px-3 py-2 text-[13px] text-white"
+                                >
+                                    추가
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { setAdding(false); setText(""); }}
+                                    className="rounded-md border border-[#E5E7EB] bg-white px-3 py-2 text-[13px] hover:bg-[#F8FAFC]"
+                                >
+                                    취소
+                                </button>
                             </div>
                         </div>
                     )}
@@ -665,7 +692,6 @@ function UserSection({
     );
 }
 
-/* 참가자 드롭다운 */
 function AddUserRow({
                         participants = [],
                         onSelect,
@@ -713,7 +739,7 @@ function AddUserRow({
 }
 
 /* ───────────────────────────────────────────────────────────
-   [WHY] 서버 응답 스냅샷에 columns가 없거나 빈 배열일 수 있어 length 안전 체크
+   length 안전 체크
 ─────────────────────────────────────────────────────────── */
 function colsLength(boardSnapshot: any): number {
     return Array.isArray(boardSnapshot?.columns) ? boardSnapshot.columns.length : 0;

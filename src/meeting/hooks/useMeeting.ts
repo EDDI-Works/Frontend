@@ -3,7 +3,7 @@ import { addDays, endOfMonth, isSameDate, startOfMonth, startOfWeek } from "../u
 import { meetingApi } from "../../api/meetingApi";
 
 type UiMeeting = {
-	id: string;            // publicId 매핑
+	id: string;            // publicId 매핑 (라우팅/URL 전용)
 	title: string;
 	allDay?: boolean;
 	start: string;         // ISO
@@ -47,15 +47,19 @@ export function useMeeting() {
 			try {
 				const res = await meetingApi.getMeetingList({ from: range.from, to: range.to });
 				const items = res?.items ?? [];
-				// 백엔드 → UI 매핑 (publicId → id)
-				let ui: UiMeeting[] = items.map(it => ({
-					id: it.publicId,
-					title: it.title,
-					allDay: !!it.allDay,
-					start: it.start,
-					end: it.end,
-					createdAt: it.updatedAt ?? undefined,
-				}));
+
+				// [CHANGED] 로컬/임시 id 사용 금지. 항상 서버가 준 publicId만 id로 사용.
+				// [CHANGED] 안전하게 문자열 보장 (백에서 UUID 36자라서 String(...)으로 고정)
+				let ui: UiMeeting[] = items
+					.filter((it: any) => !!it?.publicId)                // [CHANGED] publicId 없는 항목은 배제
+					.map((it: any) => ({
+						id: String(it.publicId),                          // [CHANGED] == server publicId (라우팅/URL 전용)
+						title: it.title,
+						allDay: !!it.allDay,
+						start: it.start,
+						end: it.end,
+						createdAt: it.updatedAt ?? undefined,
+					}));
 
 				// 간단한 클라이언트 검색(query) — 기존 훅 인터페이스 유지
 				const q = query.trim().toLowerCase();
@@ -89,7 +93,7 @@ export function useMeeting() {
 		monthDays,
 		monthWeeks,
 		meetings,                // (동일 키) MonthGrid/WeekGrid 그대로 사용 가능
-		meetingsOfDay,          // (동일 키)
+		meetingsOfDay,           // (동일 키)
 	};
 }
 
