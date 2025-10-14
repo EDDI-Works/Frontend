@@ -2,27 +2,54 @@
 import React from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import MeetingEditorBody, { type MeetingCore, type MeetingMeta } from "../components/MeetingEditorBody";
-import { useCalendar } from "../hooks/useCalendar";
-import { updateMeeting } from "../api/meetings";
+import { useMeeting } from "../hooks/useMeeting.ts";
+import { meetingApi, type ReadMeetingResponse } from "../../api/meetingApi"; // [CHANGED] 타입 import
 
 // 로컬 저장 키
 const notesKey = (id: string) => `meeting:notes:${id}`;
 const metaKey  = (id: string) => `meeting:meta:${id}`;
 const titleKey = (id: string) => `meeting:title:${id}`;
 
+// Date | string → ISO 문자열 보정 유틸
+function toISO(v?: Date | string): string | undefined {
+    if (!v) return undefined;
+    if (v instanceof Date) return v.toISOString();
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+// [NEW] 서버 응답 → 에디터 메타로 변환
+function normalizeMetaFromServer(d: ReadMeetingResponse): MeetingMeta {
+    const participants =
+        (d.participantList ?? [])
+            .map((m) => (m.nickname ?? m.name ?? m.displayName ?? "").toString().trim())
+            .filter(Boolean)
+            .join(", ");
+
+    return {
+        location: "",
+        participants,           // ", " 문자열
+        links: [],
+        notes: d.noteContent ?? "",
+    };
+}
+
 export default function MeetingPage() {
     const navigate = useNavigate();
-    const { id = "" } = useParams();             // 단일 라우트: 반드시 id 있음
-    const { meetings } = useCalendar();
+    const { id = "" } = useParams();
+    const { meetings } = useMeeting();
 
-    // 캘린더에서 대상 미팅 찾기(방금 생성한 초안도 fetch 후 여기에 들어오게)
+    // [CHANGED] 서버 상세 타입 명시
+    const [serverDetail, setServerDetail] = React.useState<ReadMeetingResponse | null>(null);
+
+    // 캘린더에서 대상 미팅 찾기
     const meeting = React.useMemo(
         () => (meetings ?? []).find((m: any) => String(m?.id) === String(id)) || null,
         [meetings, id]
     );
 
     // 기본 meta/notes 로드(없으면 빈값)
-    const baseMeta: MeetingMeta = { location: "", participants: "", links: [], files: [], notes: "" };
+    const baseMeta: MeetingMeta = { location: "", participants: "", links: [], notes: "" };
     let loadedMeta = baseMeta;
     let loadedTitle = "";
     try {
@@ -34,48 +61,109 @@ export default function MeetingPage() {
         if (t) loadedTitle = t;
     } catch {}
 
-    // 초기값 구성
+    // [CHANGED] 상세 진입 시 서버 단건 조회 + 로컬 동기화
+    React.useEffect(() => {
+        let alive = true;
+        if (!id || id === "new") return;
+
+        (async () => {
+            try {
+                const data = await meetingApi.getMeetingDetail(id); // ReadMeetingResponse
+                if (!alive || !data) return;
+                setServerDetail(data);
+
+                // ▼ 기존 data.content / data.meta 접근을 noteContent/participantList로 치환
+                if (data.title) localStorage.setItem(titleKey(id), data.title);
+                localStorage.setItem(notesKey(id), data.noteContent ?? "");
+                localStorage.setItem(
+                    metaKey(id),
+                    JSON.stringify({ ...loadedMeta, ...normalizeMetaFromServer(data) })
+                );
+            } catch {
+                // 404/권한 오류 등은 조용히 패스
+            }
+        })();
+
+        return () => { alive = false; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
+
+    // 초기값 구성 (서버 상세 > 리스트 캐시 > 로컬)
     const now = React.useMemo(() => new Date(), []);
-    const initial = React.useMemo(() => ({
-        meeting: meeting ? ({
-            id: meeting.id,
-            title: loadedTitle || (meeting.title ?? ""), // 로컬 우선
-            start: new Date(meeting.start),
-            end: new Date(meeting.end),
-            allDay: !!meeting.allDay,
-            team: meeting.team,
-        }) : ({
-            id,
-            title: loadedTitle || "",
-            start: now,
-            end: new Date(now.getTime() + 60 * 60 * 1000),
-            allDay: false,
-        } as MeetingCore),
-        meta: loadedMeta,
-    }), [meeting, id, loadedMeta, loadedTitle, now]);
+    const initial = React.useMemo(() => {
+        const src = serverDetail ?? meeting;
+        const title = loadedTitle || (src?.title ?? "");
+        const start = src?.start ? new Date(src.start) : now;
+        const end   = src?.end   ? new Date(src.end)   : new Date(now.getTime() + 60 * 60 * 1000);
+
+        // team: 서버는 teamList로 오므로 문자열로 합쳐 호환
+        const team =
+            serverDetail
+                ? (serverDetail.teamList?.map((t) => (t.name ?? t.teamName ?? "")).filter(Boolean).join(", ") || undefined)
+                : (meeting?.team ?? undefined);
+
+        const meta = serverDetail ? normalizeMetaFromServer(serverDetail) : loadedMeta;
+
+        return {
+            meeting: src ? ({
+                id, title, start, end, allDay: !!src.allDay, team,
+            }) : ({
+                id, title: title || "", start, end, allDay: false,
+            } as MeetingCore),
+            meta,
+        };
+    }, [serverDetail, meeting, id, loadedMeta, loadedTitle, now]);
 
     // 저장(자동 저장이 이 함수를 호출)
     const handleSave = React.useCallback(async ({ meeting: next, meta: nextMeta }: { meeting: MeetingCore; meta: MeetingMeta }) => {
-        if (next.id) {
-            updateMeeting(next.id, {
-                title: next.title,
-                start: next.start,
-                end: next.end,
-                allDay: next.allDay,
-                team: next.team,
-            });
+        const hasPublicId = !!next.id && next.id.trim() !== "" && next.id !== "new";
+
+        try {
+            if (hasPublicId) {
+                await meetingApi.updateMeeting(String(next.id), {
+                    title: next.title,
+                    start: toISO(next.start),
+                    end:   toISO(next.end),
+                    allDay: !!next.allDay,
+                    meetingVersion: serverDetail?.meetingVersion, // [KEEP] 낙관적 잠금
+                    // content: nextMeta.notes, // ← 노트도 PATCH로 보낼 때 주석 해제
+                });
+            } else {
+                const created = await meetingApi.createMeeting({
+                    title: next.title || "제목 없음",
+                    allDay: !!next.allDay,
+                    start: toISO(next.start)!,
+                    end:   toISO(next.end)!,
+                    projectId: null,
+                    participantAccountIds: [],
+                    teamIds: [],
+                });
+
+                const newPublicId = created.publicId;
+                // 로컬 키 이관
+                localStorage.setItem(titleKey(newPublicId), next.title ?? "");
+                if (nextMeta.notes != null) localStorage.setItem(notesKey(newPublicId), nextMeta.notes);
+                localStorage.setItem(metaKey(newPublicId), JSON.stringify(nextMeta));
+                navigate(`/meeting/${newPublicId}`, { replace: true });
+                return;
+            }
+        } catch (e) {
+            console.warn("[MeetingPage] save failed", e);
+        } finally {
+            // 로컬 백업
+            localStorage.setItem(titleKey(String(id)), next.title ?? "");
+            if (nextMeta.notes != null) localStorage.setItem(notesKey(String(id)), nextMeta.notes);
+            localStorage.setItem(metaKey(String(id)), JSON.stringify(nextMeta));
         }
-        // [NEW] 제목도 로컬 백업 (서버 실패/지연 시 대비)
-        localStorage.setItem(titleKey(String(id)), next.title ?? ""); // [NEW]
+    }, [id, navigate, serverDetail?.meetingVersion]);
 
-        if (nextMeta.notes != null) localStorage.setItem(notesKey(String(id)), nextMeta.notes);
-        localStorage.setItem(metaKey(String(id)), JSON.stringify(nextMeta));
-    }, [id]);
+    const noData =
+        !meeting && !serverDetail &&
+        !loadedMeta.notes && !loadedMeta.location && !loadedMeta.participants &&
+        !(loadedMeta.links?.length);
 
-    // 존재하지 않는 ID로 직접 들어왔을 때 UX (선택)
-    const noData = !meeting && !loadedMeta.notes && !loadedMeta.location && !loadedMeta.participants && !(loadedMeta.links?.length);
     if (noData) {
-        // 안내 UI가 필요하면 여기에, 현재는 본문만 렌더
+        // 안내 UI 필요 시 여기에
     }
 
     return (

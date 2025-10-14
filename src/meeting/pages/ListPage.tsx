@@ -1,28 +1,48 @@
+// meeting/pages/MeetingListPage.tsx
 import React from "react";
 import { LayoutGroup } from "framer-motion";
 import { MeetingSubnav } from "./MeetingLayout";
-import { useCalendar } from "../hooks/useCalendar";
+import { meetingApi } from "../../api/meetingApi";
 
 const PAGE_SIZE = 10;
 
 export default function MeetingListPage() {
-    const { meetings } = useCalendar();
-
     const [page, setPage] = React.useState(1);
+    const [pageItems, setPageItems] = React.useState<any[]>([]);
+    const [total, setTotal] = React.useState(0);
 
-    const sorted = React.useMemo(() => {
-        return [...(meetings ?? [])].sort((a: any, b: any) => {
-            const ta = new Date(a?.start ?? 0).getTime();
-            const tb = new Date(b?.start ?? 0).getTime();
-            return tb - ta;
-        });
-    }, [meetings]);
+    // 서버 페이지네이션: page 변경 시마다 호출
+    React.useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const res = await meetingApi.getMeetingList({ page, perPage: PAGE_SIZE });
+                const items = (res?.items ?? []).map(it => ({
+                    id: it.publicId,          // publicId → UI id
+                    title: it.title,
+                    teams: undefined,         // 서버 스키마에 없어서 비워둠(디자인 유지)
+                    team: undefined,
+                    start: it.start,
+                    end: it.end,
+                    status: undefined,
+                }));
 
-    const total = sorted.length;
+                // 시작시간 내림차순 정렬
+                items.sort((a, b) => new Date(b.start).getTime() - new Date(a.start).getTime());
+
+                if (!alive) return;
+                setPageItems(items);
+                setTotal(typeof res?.total === "number" ? res.total : items.length);
+            } catch {
+                if (!alive) return;
+                setPageItems([]);
+                setTotal(0);
+            }
+        })();
+        return () => { alive = false; };
+    }, [page]);
+
     const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    const startIndex = (page - 1) * PAGE_SIZE;
-    const pageItems = sorted.slice(startIndex, startIndex + PAGE_SIZE);
-
     const goPrev = () => setPage((p) => Math.max(1, p - 1));
     const goNext = () => setPage((p) => Math.min(pageCount, p + 1));
 
@@ -34,7 +54,6 @@ export default function MeetingListPage() {
     };
 
     const getStatus = (m: any): "before" | "done" => {
-        // 상태: 회의 전 / 회의 완료 (동일)
         if (m?.status === "DONE") return "done";
         if (m?.status === "SCHEDULED") return "before";
         const end = new Date(m?.end ?? m?.start ?? 0).getTime();
@@ -42,6 +61,7 @@ export default function MeetingListPage() {
     };
 
     const pad2 = (n: number) => String(n).padStart(2, "0");
+    const startIndex = (page - 1) * PAGE_SIZE;
 
     return (
         <LayoutGroup>
@@ -74,7 +94,7 @@ export default function MeetingListPage() {
                             {/* 테이블 */}
                             <div className="flex-1 min-h-0 overflow-auto rounded-xl">
                                 <div className="min-w-[980px]">
-                                    {/* 헤더: 1번 이미지 톤으로 살짝 두툼하고 밝은 회색 배경 */}
+                                    {/* 헤더 */}
                                     <div className="grid grid-cols-[88px_1fr_1fr_1fr_180px] items-center px-6 h-12 bg-[#F7F8FB] rounded-2xl text-[14px] font-medium text-[#6B7280]">
                                         <div className="tracking-wide">No.</div>
                                         <div className="tracking-wide">제목</div>
@@ -95,14 +115,13 @@ export default function MeetingListPage() {
                                         return (
                                             <div
                                                 key={m.id ?? num}
-                                                //행 높이/간격/hover 색상
                                                 className="grid grid-cols-[88px_1fr_1fr_1fr_180px] items-center px-6 min-h-16 border-b border-[#EEF2F6] hover:bg-[#FAFBFF]"
                                             >
                                                 {/* 번호 */}
                                                 <div className="text-[14px]">
-                                                  <span className="inline-flex h-6 min-w-8 items-center justify-center text-[#6B7280] font-medium px-2">
-                                                    {pad2(num)}
-                                                  </span>
+                          <span className="inline-flex h-6 min-w-8 items-center justify-center text-[#6B7280] font-medium px-2">
+                            {pad2(num)}
+                          </span>
                                                 </div>
 
                                                 {/* 제목 */}

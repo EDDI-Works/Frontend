@@ -1,9 +1,18 @@
-import type {Meeting} from "../../api/meetings";
 import {isSameDate, isBetweenDay, ymd} from "../../utils/date";
+
+type UiMeeting = {
+    id: string | number;
+    title?: string;
+    allDay?: boolean;
+    start: string; // ISO
+    end: string;   // ISO
+    team?: string;
+    teams?: string[];
+};
 
 type Props = {
     cursor: Date;
-    meetings: Meeting[];
+    meetings: UiMeeting[];
     onSelectDate: (d: Date) => void;
     selectedDate?: Date;
 };
@@ -27,7 +36,7 @@ export default function WeekGrid({
                                  }: Props) {
     const head = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
     const start = startOfWeek(cursor);
-    const days = Array.from({length: 7}, (_, i) => addDays(start, i));
+    const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
 
     return (
         <div className="h-full overflow-hidden pt-2">
@@ -35,8 +44,7 @@ export default function WeekGrid({
             <div className="grid grid-cols-7 border-y border-[#E6ECF5] text-center">
                 {head.map((d, i) => (
                     <div key={d} className="py-2 text-[12px] font-medium tracking-wide">
-                        <span
-                            className={i === 0 ? "text-[#FF6B6B]" : i === 6 ? "text-[#3A72F8]" : "text-[#8A93A3]"}>{d}</span>
+                        <span className={i === 0 ? "text-[#FF6B6B]" : i === 6 ? "text-[#3A72F8]" : "text-[#8A93A3]"}>{d}</span>
                     </div>
                 ))}
             </div>
@@ -75,18 +83,18 @@ export default function WeekGrid({
 
                                 {/* 날짜 */}
                                 <div className="px-3 pt-2">
-                                  <span
-                                      title={ymd(d)}
-                                      className={[
-                                          "inline-flex h-6.5 w-6.5 items-center justify-center text-[12px] leading-none",
-                                          isToday ? "rounded-full bg-[#F2A66C] text-white" : "",
-                                          "text-[#2B2F37]",
-                                          isSun ? "text-[#FF6B6B]" : "",
-                                          isSat ? "text-[#3A72F8]" : "",
-                                      ].join(" ")}
-                                  >
-                                    {d.getDate()}
-                                  </span>
+                  <span
+                      title={ymd(d)}
+                      className={[
+                          "inline-flex h-6.5 w-6.5 items-center justify-center text-[12px] leading-none",
+                          isToday ? "rounded-full bg-[#F2A66C] text-white" : "",
+                          "text-[#2B2F37]",
+                          isSun ? "text-[#FF6B6B]" : "",
+                          isSat ? "text-[#3A72F8]" : "",
+                      ].join(" ")}
+                  >
+                    {d.getDate()}
+                  </span>
                                 </div>
 
                                 {/* 일정 */}
@@ -97,10 +105,10 @@ export default function WeekGrid({
                                             className="flex items-center gap-2 truncate text-[12px] text-[#4B5563]"
                                             title={m.title}
                                         >
-                                            <span
-                                                className="inline-block h-1.5 w-1.5 rounded-full"
-                                                style={{backgroundColor: m.allDay ? "#F6A77A" : "#8AB6FF"}}
-                                            />
+                      <span
+                          className="inline-block h-1.5 w-1.5 rounded-full"
+                          style={{ backgroundColor: m.allDay ? "#F6A77A" : "#8AB6FF" }}
+                      />
                                             <span className="truncate">{m.title}</span>
                                         </div>
                                     ))}

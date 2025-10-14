@@ -1,32 +1,23 @@
 import React from "react";
 
-const USE_REALTIME_PARTICIPANTS = false;
-
-// === util (기존 동일) ===
-function getLocalUser() {
-    const k = "app:user";
-    try { const raw = localStorage.getItem(k); if (raw) return JSON.parse(raw); } catch {}
-    const u = { id: crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2) };
-    localStorage.setItem(k, JSON.stringify(u));
-    return u;
-}
-function getLocalDisplayName() {
-    const keys = ["app:profile:name", "app:displayName", "user:name"];
-    for (const k of keys) { const v = localStorage.getItem(k); if (v && v.trim()) return v.trim(); }
-    return "";
-}
+// 유틸
 function formatKRDateTime(input?: string | number | Date) {
     if (!input) return "—";
     const d = typeof input === "string" || typeof input === "number" ? new Date(input) : input;
     if (Number.isNaN(d.getTime())) return "—";
-    const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0"); let h = d.getHours();
-    const min = String(d.getMinutes()).padStart(2, "0"); const ampm = h < 12 ? "오전" : "오후";
-    h = h % 12 || 12; return `${y}. ${m}. ${day} ${ampm} ${h}:${min}`;
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    let h = d.getHours();
+    const min = String(d.getMinutes()).padStart(2, "0");
+    const ampm = h < 12 ? "오전" : "오후";
+    h = h % 12 || 12;
+    return `${y}. ${m}. ${day} ${ampm} ${h}:${min}`;
 }
 
 type Props = {
-    meetingId: string; ownerId: string;
+    meetingId: string;
+    ownerId: string;
     allDay: boolean; setAllDay: (v: boolean) => void;
     start: Date; setStart: (d: Date) => void;
     end: Date; setEnd: (d: Date) => void;
@@ -37,7 +28,12 @@ type Props = {
 
     lastEditorName?: string; lastEditedAt?: string | number | Date;
     createdByName?: string; createdAt?: string | number | Date;
+
+    currentUserId?: string;
     currentUserName?: string;
+
+    // 후보자 디렉터리(선택). key: 팀명, value: 멤버 이름 배열
+    teamDirectory?: Record<string, string[]>;
 };
 
 export default function Details({
@@ -48,11 +44,9 @@ export default function Details({
                                     location, setLocation,
                                     participants, setParticipants,
                                     lastEditorName, lastEditedAt, createdByName, createdAt,
-                                    currentUserName,
+                                    currentUserId, currentUserName,
+                                    teamDirectory,
                                 }: Props) {
-    const me = React.useMemo(getLocalUser, []);
-    const myName = currentUserName?.trim() || getLocalDisplayName();
-
     // 날짜/시간 포맷
     const fmtDate = (d: Date) =>
         `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -60,12 +54,13 @@ export default function Details({
         `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     const parseLocal = (date: string, time: string) => new Date(`${date}T${time || "00:00"}`);
 
-    // 권한(기존 로직 유지)
+    // 권한
     const participantList = React.useMemo(
         () => participants.split(",").map((s) => s.trim()).filter(Boolean),
         [participants]
     );
-    const isOwner = me.id === ownerId;
+    const myName = currentUserName?.trim() || "";
+    const isOwner = !!currentUserId && currentUserId === ownerId;
     const isParticipant = !!myName && participantList.includes(myName);
     const canManageAttendees = isOwner;
     const canEditDetails = isOwner || isParticipant;
@@ -76,7 +71,7 @@ export default function Details({
     const initial = (name?: string) => (name?.trim()?.charAt(0) ?? "—");
 
     return (
-        // [UI-ONLY] 패널 배경/보더 톤 정리
+        // [UI-ONLY] 패널 배경/보더 톤 유지
         <div className="rounded-xl bg-[#F9FBFF] border border-[#E6EBF2] p-4 w-[340px] max-w-full text-[#111827]">
             {/* 종일 */}
             <Row label="종일">
@@ -148,16 +143,15 @@ export default function Details({
             <ParticipantsEditor
                 meetingId={meetingId}
                 ownerId={ownerId}
+                currentUserId={currentUserId}
                 value={participants}
                 onChange={setParticipants}
                 filterTeams={filterTeams}
                 canManage={canManageAttendees}
+                teamDirectory={teamDirectory}
             />
-            {USE_REALTIME_PARTICIPANTS && (
-                <div className="mt-2 text-[11px] text-[#9CA3AF]">실시간 편집 활성화됨 · 삭제는 생성자만 가능</div>
-            )}
 
-            {/* 메타 — [UI-ONLY] 상자 제거, 라인/타이포만 */}
+            {/* 메타 */}
             <div className="mt-6 space-y-2">
                 <MetaRow label="최종 편집자">
                     <Avatar text={initial(lastEditorName)} />
@@ -178,7 +172,7 @@ export default function Details({
     );
 }
 
-/* ── UI helpers ───────────────────────── */
+// UI 헬퍼
 
 function SectionLabel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
     return <div className={`mt-3 mb-1 text-[12px] text-[#6B7280] ${className}`}>{children}</div>;
@@ -238,7 +232,7 @@ function Avatar({ text }: { text: string }) {
     );
 }
 
-/* ── 필터/참여자 (로직은 그대로) ───────────────────────── */
+// 필터/ 참여자
 
 function TeamFilterBox({
                            allTeams, value, onChange, editable = true,
@@ -295,28 +289,29 @@ function TeamFilterBox({
 }
 
 function ParticipantsEditor({
-                                ownerId, value, onChange, filterTeams, canManage,
+                                meetingId, ownerId, currentUserId, value, onChange, filterTeams, canManage, teamDirectory,
                             }: {
-    meetingId: string; ownerId: string; value: string;
-    onChange: (v: string) => void; filterTeams: string[]; canManage: boolean;
+    meetingId: string; ownerId: string; currentUserId?: string;
+    value: string; onChange: (v: string) => void;
+    filterTeams: string[]; canManage: boolean;
+    teamDirectory?: Record<string, string[]>;
 }) {
-    const me = React.useMemo(getLocalUser, []);
     const list = React.useMemo(() => value.split(",").map((s) => s.trim()).filter(Boolean), [value]);
     const [input, setInput] = React.useState("");
 
-    const TEAM_MEMBERS: Record<string, string[]> = React.useMemo(() => ({
-        "플랫폼팀": ["박조아", "김개발"],
-        "AI팀": ["배진아", "이디자"],
-        "프론트팀": ["배진아", "김개발"],
-        "백엔드팀": ["박조아"],
-        "PM팀": ["박조아", "배진아"],
-    }), []);
-
+    // 부모가 준 teamDirectory에서 후보를 계산
     const memberTeamsMap = React.useMemo(() => {
         const map = new Map<string, Set<string>>();
-        filterTeams.forEach((t) => { (TEAM_MEMBERS[t] ?? []).forEach((m) => { if (!map.has(m)) map.set(m, new Set()); map.get(m)!.add(t); }); });
+        if (!teamDirectory) return map;
+        filterTeams.forEach((t) => {
+            (teamDirectory[t] ?? []).forEach((m) => {
+                if (!map.has(m)) map.set(m, new Set());
+                map.get(m)!.add(t);
+            });
+        });
         return map;
-    }, [filterTeams, TEAM_MEMBERS]);
+    }, [filterTeams, teamDirectory]);
+
     const candidates = React.useMemo(() => Array.from(memberTeamsMap.keys()), [memberTeamsMap]);
 
     const add = (name: string) => {
@@ -326,7 +321,10 @@ function ParticipantsEditor({
         onChange([...list, v].join(", "));
         setInput("");
     };
-    const remove = (name: string) => { if (me.id !== ownerId) return; onChange(list.filter((x) => x !== name).join(", ")); };
+    const remove = (name: string) => {
+        if (!currentUserId || currentUserId !== ownerId) return; // [CHANGED] 소유자만 삭제 가능
+        onChange(list.filter((x) => x !== name).join(", "));
+    };
     const initial = (s: string) => s.trim().charAt(0);
 
     return (
@@ -340,7 +338,7 @@ function ParticipantsEditor({
                                 {initial(n)}
                             </div>
                             <span className="text-[13px]">{n}</span>
-                            {me.id === ownerId && (
+                            {currentUserId === ownerId && (
                                 <button className="ml-1 text-[#9CA3AF] hover:text-[#6B7280]" onClick={() => remove(n)} type="button" title="삭제">×</button>
                             )}
                         </div>

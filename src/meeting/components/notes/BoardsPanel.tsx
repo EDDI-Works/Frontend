@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { meetingApi } from "../../../api/meetingApi";
 
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function parseParticipants(input: string): string[] {
@@ -38,12 +39,15 @@ function pickPaletteForLabel(label: string) {
     return pool[h % pool.length];
 }
 
-export default function BoardsPanel({ participantsStr }: { participantsStr: string }) {
+export default function BoardsPanel({ publicId, participantsStr }: { publicId: string; participantsStr: string }) {
     const participants = useMemo(() => parseParticipants(participantsStr), [participantsStr]);
 
     const [templateTitle, setTemplateTitle] = useState<string>("");
     const [columns, setColumns] = useState<Column[]>([]);
     const [openUsers, setOpenUsers] = useState<Record<string, boolean>>({});
+
+    // [NEW] 서버 템플릿 id 보존 (Content에서 boards:init detail.template로 전달됨)
+    const templateIdRef = useRef<string | null>(null);
 
     // 팝오버/프리뷰
     const [addOpen, setAddOpen] = useState(false);
@@ -51,23 +55,102 @@ export default function BoardsPanel({ participantsStr }: { participantsStr: stri
     const addBtnRef = useRef<HTMLButtonElement | null>(null);
     const [draftLabel, setDraftLabel] = useState<string>("");
 
+    // [NEW] ETag/updatedAt 캐시 — 서버 응답 헤더/필드 재사용
+    const [boardEtag, setBoardEtag] = useState<string | null>(null);
+    const etagKey = `boardEtag:${publicId}`;
+
     // 템플릿 표시/숨김 이벤트
     useEffect(() => {
         try { window.dispatchEvent(new Event(columns.length > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
     }, [columns]);
 
+    // [NEW] 초기 로드: 서버 보드 스냅샷 GET (If-None-Match 지원)
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const prev = localStorage.getItem(etagKey);
+                const res = await meetingApi.getMeetingBoard(publicId, prev || undefined); // 200 or 304
+                if (!alive) return;
+                if (res?.status === 304) {
+                    // 최신 그대로
+                    setBoardEtag(prev ?? null);
+                    return;
+                }
+                if (res?.status === 200 && res.data) {
+                    const { boardSnapshot, updatedAt } = res.data as any;
+                    // snapshot → local state 복원
+                    if (boardSnapshot) {
+                        // template/title
+                        templateIdRef.current = boardSnapshot.template ?? null;
+                        setTemplateTitle(boardSnapshot.title ?? "");
+
+                        // columns
+                        const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => ({
+                            id: c.id || `c${i + 1}`,
+                            key: c.key,
+                            label: c.label,
+                            users: (c.users ?? []).map((u: any) => ({
+                                id: u.id || genId(),
+                                name: u.name,
+                                items: (u.items ?? []).map((it: any) => ({
+                                    id: it.id || genId(),
+                                    content: it.content,
+                                    createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                                })),
+                            })),
+                            ...(c.badgeClass ? { badgeClass: c.badgeClass } : {}),
+                        }));
+                        setColumns(cols);
+                        setOpenUsers({});
+                    }
+
+                    // ETag/updatedAt 캐시
+                    const et = res.headers?.etag || updatedAt || null;
+                    setBoardEtag(et);
+                    if (et) localStorage.setItem(etagKey, et);
+
+                    // 상태 이벤트
+                    try { window.dispatchEvent(new Event(colsLength(boardSnapshot) > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
+                }
+            } catch {
+                // 실패 시 조용히 패스 (빈 보드로)
+            }
+        })();
+        return () => { alive = false; };
+        // publicId가 바뀌면 다시 로드
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [publicId]);
+
+    // [NEW] Content → boards:init 이벤트로 템플릿 적용 시 서버 상태로 초기화
     useEffect(() => {
         function onInit(e: any) {
-            const detail = e?.detail as { title?: string; columns: Array<{ key: ColumnKey; label?: string }> };
+            const detail = e?.detail as {
+                template?: string;
+                title?: string;
+                columns: Array<{ id?: string; key: ColumnKey; label?: string; badgeClass?: string; users?: any[] }>;
+            };
             if (!detail) return;
 
+            templateIdRef.current = detail.template ?? null; // [NEW] 서버 템플릿 id 보존
             setTemplateTitle(detail.title || "");
-            const cols: Column[] = (detail.columns || []).map(({ key, label }) => ({
-                id: genId(),
+
+            const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => ({
+                id: id || `c${i + 1}`,
                 key,
-                label: label ?? COLUMN_STYLE[key].label,
-                users: [],
+                label: (label ?? COLUMN_STYLE[key].label).trim(),
+                users: (users ?? []).map((u: any) => ({
+                    id: u.id || genId(),
+                    name: u.name,
+                    items: (u.items ?? []).map((it: any) => ({
+                        id: it.id || genId(),
+                        content: it.content,
+                        createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                    })),
+                })),
+                ...(badgeClass ? { badgeClass } : {}),
             }));
+
             setColumns(cols);
             setOpenUsers({});
             try { window.dispatchEvent(new Event("boards:cleared")); } catch {}
@@ -152,6 +235,52 @@ export default function BoardsPanel({ participantsStr }: { participantsStr: stri
         }
     }
 
+    // [NEW] 서버 업서트: columns/template/title → snapshot PUT (디바운스)
+    useEffect(() => {
+        // 컬럼이 하나도 없고 템플릿도 없으면 업서트 안 함
+        if (!publicId) return;
+
+        // 디바운스 600ms — 기존 autosave 리듬과 동일화
+        const t = window.setTimeout(async () => {
+            try {
+                const snapshot = {
+                    template: templateIdRef.current,        // 서버 템플릿 id (없으면 null로 저장됨)
+                    title: templateTitle || "",
+                    columns: columns.map(c => ({
+                        id: c.id,
+                        key: c.key,
+                        label: c.label,
+                        badgeClass: c.badgeClass ?? null,
+                        users: c.users.map(u => ({
+                            id: u.id,
+                            name: u.name,
+                            items: u.items.map(it => ({
+                                id: it.id,
+                                content: it.content,
+                                createdAt: it.createdAt,          // number(ms)
+                            })),
+                        })),
+                    })),
+                };
+
+                // PUT /meeting/{publicId}/board
+                const res = await meetingApi.putMeetingBoard(publicId, { snapshot });
+                // 200 OK + ETag(or updatedAt)
+                const { updatedAt } = res.data as any;
+                const et = res.headers?.etag || updatedAt || null;
+                if (et) {
+                    setBoardEtag(et);
+                    localStorage.setItem(etagKey, et);
+                }
+            } catch {
+                // 조용히 무시 (다음 편집 시 재시도)
+            }
+        }, 600);
+
+        return () => window.clearTimeout(t);
+        // templateTitle/columns 변경 시 업서트
+    }, [publicId, templateTitle, columns]); // eslint-disable-line react-hooks/exhaustive-deps
+
     return (
         <div className="mt-6">
             {hasBoards && templateTitle && (
@@ -209,7 +338,7 @@ export default function BoardsPanel({ participantsStr }: { participantsStr: stri
     );
 }
 
-/* ================= 하위 컴포넌트 ================= */
+/* ================= 하위 컴포넌트 (그대로) ================= */
 
 function ColumnCard({
                         data, onRemove, onUpdate, openUsers, onToggleUser, onUpdateUserItems,
@@ -226,7 +355,7 @@ function ColumnCard({
     const badgeClass = data.badgeClass ?? fallback.badgeClass;
     const total = data.users.reduce((acc, u) => acc + u.items.length, 0);
 
-    // ▼▼▼ 라벨/색 편집 팝오버 복구 ▼▼▼
+    // 라벨/색 편집 팝오버
     const [menuOpen, setMenuOpen] = useState(false);
     const [menuX, setMenuX] = useState(0);
     const [menuY, setMenuY] = useState(0);
@@ -239,7 +368,6 @@ function ColumnCard({
         setDraft(data.label);
         setMenuOpen(true);
     }
-    // ▲▲▲ 복구 끝 ▲▲▲
 
     return (
         <div className="w-[360px] flex-none rounded-2xl border border-[#E6ECF4] bg-white">
@@ -247,7 +375,7 @@ function ColumnCard({
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
-                        onClick={openMenu} // [RESTORED] 클릭 시 편집 팝오버
+                        onClick={openMenu}
                         className={`rounded px-2 py-[2px] text-[12px] ${badgeClass}`}
                         title="클릭해서 라벨/색 편집"
                     >
@@ -294,7 +422,6 @@ function ColumnCard({
                 })}
             </div>
 
-            {/* ▼▼▼ 편집 팝오버 UI 복구 ▼▼▼ */}
             {menuOpen && (
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
@@ -317,7 +444,7 @@ function ColumnCard({
                         </button>
 
                         <div className="mb-1 px-1 text-[11px] text-[#6B7280]">색</div>
-                        <div className="max-h-[200px] overflow-auto pr-1">
+                        <div className="max-h:[200px] overflow-auto pr-1">
                             {COLOR_PALETTE.map(p => {
                                 const selected = (`${p.bg} ${p.text}`) === (data.badgeClass ?? "");
                                 return (
@@ -349,7 +476,6 @@ function ColumnCard({
                     </div>
                 </>
             )}
-            {/* ▲▲▲ 복구 끝 ▲▲▲ */}
         </div>
     );
 }
@@ -385,7 +511,7 @@ function PreviewColumnCard({ label }: { label: string }) {
 
 function AddColumnCard({ onOpen, btnRef }: { onOpen: () => void; btnRef: React.RefObject<HTMLButtonElement> }) {
     return (
-        <div className="w-[220px] flex-none rounded-2xl border-2 border-dashed border-[#D9E2F2] bg-white p-3">
+        <div className="w-[220px] flex-none rounded-2xl border-2 border-dashed border-[#D9E2F2] bg:white p-3">
             <button ref={btnRef} type="button" onClick={onOpen} className="w-full text-left text-[13px] text-[#6482C0]">
                 + 항목 추가
             </button>
@@ -574,7 +700,7 @@ function AddUserRow({
                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 hover:bg-[#F8FAFC]"
                             title={name}
                         >
-                            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
+                            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg:white text-[12px] text-[#6B7280]">
                                 {name[0]}
                             </div>
                             <div className="text-[13px] text-[#111827]">{name}</div>
@@ -584,4 +710,11 @@ function AddUserRow({
             )}
         </div>
     );
+}
+
+/* ───────────────────────────────────────────────────────────
+   [WHY] 서버 응답 스냅샷에 columns가 없거나 빈 배열일 수 있어 length 안전 체크
+─────────────────────────────────────────────────────────── */
+function colsLength(boardSnapshot: any): number {
+    return Array.isArray(boardSnapshot?.columns) ? boardSnapshot.columns.length : 0;
 }

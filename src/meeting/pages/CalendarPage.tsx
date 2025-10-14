@@ -3,9 +3,10 @@ import CalendarHeader from "../components/calendar/CalendarHeader";
 import MonthGrid from "../components/calendar/MonthGrid";
 import DayPanel from "../components/calendar/DayPanel";
 import WeekGrid from "../components/calendar/WeekGrid";
-import { useCalendar } from "../hooks/useCalendar";
+import { useMeeting } from "../hooks/useMeeting.ts";
 import { LayoutGroup } from "framer-motion";
 import { MeetingSubnav } from "./MeetingLayout";
+import { meetingApi } from "../../api/meetingApi";
 
 export default function CalendarPage() {
     const {
@@ -14,9 +15,59 @@ export default function CalendarPage() {
         selectedDate,
         setSelectedDate,
         monthWeeks,
-        meetings,
-        meetingsOfDay,
-    } = useCalendar();
+    } = useMeeting();
+
+    // 서버에서 가져온 미팅들
+    type UiMeeting = { id: string; title: string; allDay?: boolean; start: string; end: string; team?: string; teams?: string[]; createdAt?: string; };
+    const [remoteMeetings, setRemoteMeetings] = React.useState<UiMeeting[]>([]);
+
+    //  YYYY-MM-DD 포맷터
+    const fmtYmd = (d: Date) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+    };
+
+    // 월 전체 범위(from/to)
+    const monthStart = React.useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth(), 1), [cursor]);
+    const monthEnd   = React.useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0), [cursor]);
+
+    // meetingApi로 월 범위 목록 조회
+    React.useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const res = await meetingApi.getMeetingList({
+                    from: fmtYmd(monthStart),
+                    to: fmtYmd(monthEnd),
+                });
+                const ui = (res?.items ?? []).map(it => ({
+                    id: it.publicId,
+                    title: it.title,
+                    allDay: !!it.allDay,
+                    start: it.start,
+                    end: it.end,
+                    createdAt: it.updatedAt ?? undefined,
+                }));
+                if (alive) setRemoteMeetings(ui);
+            } catch {
+                if (alive) setRemoteMeetings([]); // 실패 시 빈 배열로만 처리
+            }
+        })();
+        return () => { alive = false; };
+    }, [monthStart, monthEnd]);
+
+    // DayPanel 필터
+    const isSameDate = (a: Date, b: Date) =>
+        a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+    const meetingsOfDayLocal = (d: Date) =>
+        (remoteMeetings ?? []).filter(
+            (m) =>
+                isSameDate(d, new Date(m.start)) ||
+                (m.allDay && d >= startOfDay(new Date(m.start)) && d <= startOfDay(new Date(m.end)))
+        );
 
     const panelW = 360;
     const [mode, setMode] = React.useState<"week" | "month">("month");
@@ -128,14 +179,14 @@ export default function CalendarPage() {
                                             <MonthGrid
                                                 cursor={cursor}
                                                 weeks={monthWeeks}
-                                                meetings={meetings}
+                                                meetings={remoteMeetings}
                                                 onSelectDate={handleSelectDate}
                                                 selectedDate={selectedDate}
                                             />
                                         ) : (
                                             <WeekGrid
                                                 cursor={cursor}
-                                                meetings={meetings}
+                                                meetings={remoteMeetings}
                                                 onSelectDate={handleSelectDate}
                                                 selectedDate={selectedDate}
                                             />
@@ -148,7 +199,7 @@ export default function CalendarPage() {
                                     <div className="h-full min-h-0 overflow-auto rounded-xl shadow-[0_4px_24px_rgba(31,41,55,0.06)] border border-neutral-200/80">
                                         <DayPanel
                                             date={selectedDate ?? new Date()}
-                                            items={selectedDate ? meetingsOfDay(selectedDate) : []}
+                                            items={selectedDate ? meetingsOfDayLocal(selectedDate) : []}
                                             onPrevDay={goPrevDay}
                                             onNextDay={goNextDay}
                                         />
@@ -179,7 +230,7 @@ export default function CalendarPage() {
                                 </button>
                                 <DayPanel
                                     date={selectedDate ?? new Date()}
-                                    items={selectedDate ? meetingsOfDay(selectedDate) : []}
+                                    items={selectedDate ? meetingsOfDayLocal(selectedDate) : []}
                                     onPrevDay={goPrevDay}
                                     onNextDay={goNextDay}
                                 />
