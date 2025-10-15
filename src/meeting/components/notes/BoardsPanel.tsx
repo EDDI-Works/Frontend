@@ -84,10 +84,12 @@ export default function BoardsPanel({
                                         publicId,
                                         participantsStr,
                                         canPersistBoards = false,
+                                        onTemplateTitleChange,
                                     }: {
     publicId: string;
     participantsStr: string;
     canPersistBoards?: boolean;
+    onTemplateTitleChange?: (title: string) => void;
 }) {
     const participants = useMemo(() => parseParticipants(participantsStr), [participantsStr]);
 
@@ -104,6 +106,23 @@ export default function BoardsPanel({
 
     const [boardEtag, setBoardEtag] = useState<string | null>(null);
     const etagKey = `boardEtag:${publicId}`;
+
+    function propagateTitle(nextTitle: string) {
+        const title = (nextTitle || "").trim();
+        if (!title) return;
+        if (typeof onTemplateTitleChange === "function") {
+            onTemplateTitleChange(title);
+        } else {
+            try {
+                window.dispatchEvent(new CustomEvent("meeting:title:set", { detail: { title } }));
+            } catch {}
+        }
+    }
+
+    useEffect(() => {
+        const t = (templateTitle || "").trim();
+        if (t) propagateTitle(t);
+    }, [templateTitle]);
 
     // 템플릿 표시/숨김 이벤트
     useEffect(() => {
@@ -131,7 +150,9 @@ export default function BoardsPanel({
 
                     if (boardSnapshot) {
                         templateIdRef.current = boardSnapshot.template ?? null;
-                        setTemplateTitle(boardSnapshot.title ?? "");
+                        const loadedTitle = boardSnapshot.title ?? "";
+                        setTemplateTitle(loadedTitle);
+                        propagateTitle(loadedTitle); // 로드 시 회의 제목에도 반영
 
                         // key를 안전하게 정규화
                         const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => {
@@ -186,7 +207,9 @@ export default function BoardsPanel({
             if (!detail) return;
 
             templateIdRef.current = detail.template ?? null;
-            setTemplateTitle(detail.title || "");
+            const nextTitle = detail.title || "";
+            setTemplateTitle(nextTitle);
+            propagateTitle(nextTitle);
 
             // key 안전 정규화
             const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => {
@@ -219,7 +242,7 @@ export default function BoardsPanel({
         }
         window.addEventListener("boards:init" as any, onInit);
         return () => window.removeEventListener("boards:init" as any, onInit);
-    }, []);
+    }, [onTemplateTitleChange]);
 
     function markEdited() { try { window.dispatchEvent(new Event("boards:edited")); } catch {} }
 
@@ -341,10 +364,6 @@ export default function BoardsPanel({
 
     return (
         <div className="mt-6">
-            {hasBoards && templateTitle && (
-                <div className="mb-2 text-[15px] font-semibold text-[#111827]">{templateTitle}</div>
-            )}
-
             <div className="flex gap-3 overflow-x-auto rounded-xl bg-[#F7FAFF] p-3">
                 {!hasBoards ? (
                     <>

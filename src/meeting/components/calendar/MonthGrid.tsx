@@ -1,11 +1,11 @@
-import {isSameDate, isBetweenDay, ymd} from "../../utils/date";
+import { isSameDate, isBetweenDay, ymd } from "../../utils/date";
 
 type UiMeeting = {
     id: string | number;
     title?: string;
     allDay?: boolean;
-    start: string;  // ISO
-    end: string;    // ISO
+    start: string;
+    end: string;
     team?: string;
     teams?: string[];
 };
@@ -23,19 +23,17 @@ export default function MonthGrid({
                                   }: Props) {
 
     return (
-        <div className="h-full overflow-hidden pt-2 pb-6">
-            {/* 요일 헤더 */}
-            <div className="grid grid-cols-7 border-y border-[#E6ECF5] text-center">
+        <div className="h-full overflow-hidden pt-2 pb-4">
+            <div className="grid grid-cols-7 h-10 border-y border-[#E6ECF5] text-center">
                 {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map((d, i) => (
-                    <div key={d} className="py-2 text-[12px] font-medium tracking-wide">
-            <span
-                className={i === 0 ? "text-[#FF6B6B]" : i === 6 ? "text-[#3A72F8]" : "text-[#8A93A3]"}>{d}</span>
+                    <div key={d} className="flex items-center justify-center text-[12px] font-medium tracking-wide">
+                        <span className={i === 0 ? "text-[#FF6B6B]" : i === 6 ? "text-[#3A72F8]" : "text-[#8A93A3]"}>{d}</span>
                     </div>
                 ))}
             </div>
 
-            {/* 6행 균등압축 + 경계선 안정화 */}
-            <div className="grid h-[calc(100%-40px)] grid-rows-[repeat(6,minmax(0,1fr))] divide-y divide-[#E6ECF5]">
+            {/* 본문 + 하단 보더 유지 */}
+            <div className="grid h-[calc(100%-40px)] grid-rows-[repeat(6,minmax(0,1fr))] divide-y divide-[#E6ECF5] border-b border-[#E6ECF5]">
                 {weeks.map((row, ri) => (
                     <div key={ri} className="grid grid-cols-7 divide-x divide-[#E6ECF5]">
                         {row.map((d, di) => {
@@ -45,7 +43,6 @@ export default function MonthGrid({
                             const isSun = d.getDay() === 0;
                             const isSat = d.getDay() === 6;
 
-                            // [UNCHANGED] 날짜 기준 미팅 필터
                             const items = meetings.filter(
                                 (m) =>
                                     isSameDate(d, new Date(m.start)) ||
@@ -64,15 +61,14 @@ export default function MonthGrid({
                                         out ? "bg-[#F7F9FC]" : "bg-white",
                                     ].join(" ")}
                                 >
-                                    {/* 선택 라인 */}
+                                    {/* 선택선: 라운드 제거, 그리드 라인과 정렬 */}
                                     {isSel && (
                                         <span
                                             aria-hidden
-                                            className="pointer-events-none absolute inset-0 z-10 outline outline-[2px] outline-[#F2A66C] outline-offset-[-2px]"
+                                            className="pointer-events-none absolute inset-0 z-10 outline outline-[2px] outline-[#F2A66C] outline-offset-[-1px]"
                                         />
                                     )}
 
-                                    {/* 날짜 */}
                                     <div className="px-2 pt-2">
                     <span
                         title={ymd(d)}
@@ -88,8 +84,7 @@ export default function MonthGrid({
                     </span>
                                     </div>
 
-                                    {/* 일정 목록 */}
-                                    <div className="space-y-1 px-3 pb-3">
+                                    <div className="space-y-1 px-3 pb-4">
                                         {items.map((m) => (
                                             <div
                                                 key={m.id}
@@ -97,8 +92,8 @@ export default function MonthGrid({
                                                 title={m.title}
                                             >
                         <span
-                            className="inline-block h-1.5 w-1.5 rounded-full"
-                            style={{backgroundColor: m.allDay ? "#F6A77A" : "#8AB6FF"}}
+                            className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
+                            style={{ backgroundColor: m.allDay ? "#F6A77A" : "#8AB6FF" }}
                         />
                                                 <span className="truncate">{m.title ?? "Untitled"}</span>
                                             </div>

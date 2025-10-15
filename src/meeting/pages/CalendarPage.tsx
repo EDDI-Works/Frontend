@@ -7,18 +7,23 @@ import { useMeeting } from "../hooks/useMeeting.ts";
 import { LayoutGroup } from "framer-motion";
 import { MeetingSubnav } from "./MeetingLayout";
 import { meetingApi } from "../../api/meetingApi";
+import { useNavigate } from "react-router-dom";
 
 export default function CalendarPage() {
-    const {
-        cursor,
-        setCursor,
-        selectedDate,
-        setSelectedDate,
-        monthWeeks,
-    } = useMeeting();
+    const { cursor, setCursor, selectedDate, setSelectedDate, monthWeeks } = useMeeting();
+    const navigate = useNavigate();
 
     // 서버에서 가져온 미팅들
-    type UiMeeting = { id: string; title: string; allDay?: boolean; start: string; end: string; team?: string; teams?: string[]; createdAt?: string; };
+    type UiMeeting = {
+        id: string;
+        title: string;
+        allDay?: boolean;
+        start: string;
+        end: string;
+        team?: string;
+        teams?: string[];
+        createdAt?: string;
+    };
     const [remoteMeetings, setRemoteMeetings] = React.useState<UiMeeting[]>([]);
 
     //  YYYY-MM-DD 포맷터
@@ -31,7 +36,7 @@ export default function CalendarPage() {
 
     // 월 전체 범위(from/to)
     const monthStart = React.useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth(), 1), [cursor]);
-    const monthEnd   = React.useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0), [cursor]);
+    const monthEnd = React.useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0), [cursor]);
 
     // meetingApi로 월 범위 목록 조회
     React.useEffect(() => {
@@ -42,7 +47,7 @@ export default function CalendarPage() {
                     from: fmtYmd(monthStart),
                     to: fmtYmd(monthEnd),
                 });
-                const ui = (res?.items ?? []).map(it => ({
+                const ui = (res?.items ?? []).map((it) => ({
                     id: it.publicId,
                     title: it.title,
                     allDay: !!it.allDay,
@@ -52,16 +57,22 @@ export default function CalendarPage() {
                 }));
                 if (alive) setRemoteMeetings(ui);
             } catch {
-                if (alive) setRemoteMeetings([]); // 실패 시 빈 배열로만 처리
+                if (alive) setRemoteMeetings([]); // 실패 시 빈 배열
             }
         })();
-        return () => { alive = false; };
+        return () => {
+            alive = false;
+        };
     }, [monthStart, monthEnd]);
 
     // DayPanel 필터
     const isSameDate = (a: Date, b: Date) =>
         a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+    const startOfDay = (d: Date) => {
+        const x = new Date(d);
+        x.setHours(0, 0, 0, 0);
+        return x;
+    };
     const meetingsOfDayLocal = (d: Date) =>
         (remoteMeetings ?? []).filter(
             (m) =>
@@ -91,27 +102,20 @@ export default function CalendarPage() {
 
     const handleSelectDate = (d: Date) => {
         setSelectedDate(new Date(d.getFullYear(), d.getMonth(), d.getDate()));
-        if (overlay) {
-            setPanelOpen(true); // 좁은 화면에서만: 날짜 클릭 시 모달 오픈
-        }
+        if (overlay) setPanelOpen(true);
     };
 
     // 닫기 시 선택도 해제(overlay일 때만)
     const handleClosePanel = () => {
         setPanelOpen(false);
-        if (overlay) {
-            setSelectedDate(null as unknown as Date); // 선택 라인 제거
-        }
+        if (overlay) setSelectedDate(null as unknown as Date);
     };
 
     const goToDay = (offset: number) => {
         const base = selectedDate ?? cursor;
         const next = new Date(base.getFullYear(), base.getMonth(), base.getDate() + offset);
         setSelectedDate(next);
-        if (
-            next.getFullYear() !== cursor.getFullYear() ||
-            next.getMonth() !== cursor.getMonth()
-        ) {
+        if (next.getFullYear() !== cursor.getFullYear() || next.getMonth() !== cursor.getMonth()) {
             setCursor(new Date(next.getFullYear(), next.getMonth(), 1));
         }
     };
@@ -126,9 +130,52 @@ export default function CalendarPage() {
     };
 
     // Week 모드에서 좁은 폭일 때만 고정 높이로 눌림 방지
-    const containerHeightClass = overlay
-        ? (mode === "week" ? "h-[640px]" : "h-auto")
-        : "h-auto xl:h-[720px] 2xl:h-[800px]";
+    const containerHeightClass = overlay ? (mode === "week" ? "h-[640px]" : "h-auto") : "h-auto xl:h-[720px] 2xl:h-[800px]";
+
+    // === Filter 버튼 숨김(최소 수정, DOM 레벨) ===
+    React.useEffect(() => {
+        const hideFilter = () => {
+            const buttons = Array.from(document.querySelectorAll("button"));
+            buttons.forEach((b) => {
+                const t = (b.textContent || "").trim();
+                if (t === "Filter" || t === "필터") (b as HTMLButtonElement).style.display = "none";
+            });
+        };
+        hideFilter();
+        const id = window.setInterval(hideFilter, 300);
+        return () => window.clearInterval(id);
+    }, []);
+
+    // ======== DayPanel 아이템 클릭 처리(컴포넌트 수정 없이) ========
+    // 컨테이너 ref를 잡고, 클릭된 엘리먼트의 텍스트에 포함된 제목으로 매칭하여 이동
+    const desktopPanelRef = React.useRef<HTMLDivElement | null>(null);
+    const overlayPanelRef = React.useRef<HTMLDivElement | null>(null);
+
+    const tryOpenByClick = React.useCallback(
+        (ev: React.MouseEvent<HTMLDivElement>) => {
+            const d = selectedDate ?? new Date();
+            const items = meetingsOfDayLocal(d);
+            if (!items.length) return;
+
+            // 클릭된 요소부터 컨테이너까지 올라가며 텍스트 매칭
+            let el = ev.target as HTMLElement | null;
+            const root = ev.currentTarget as HTMLElement;
+            while (el && el !== root) {
+                const text = (el.textContent || "").trim();
+                if (text) {
+                    // 제목 길이 긴 것부터 매칭(부분일치 대비)
+                    const sorted = items.slice().sort((a, b) => (b.title || "").length - (a.title || "").length);
+                    const hit = sorted.find((m) => text.includes(m.title || ""));
+                    if (hit?.id) {
+                        navigate(`/meeting/${hit.id}`);
+                        return;
+                    }
+                }
+                el = el.parentElement;
+            }
+        },
+        [navigate, selectedDate, remoteMeetings] // remoteMeetings가 바뀌면 meetingsOfDayLocal 결과도 갱신됨
+    );
 
     return (
         <LayoutGroup>
@@ -136,22 +183,15 @@ export default function CalendarPage() {
                 {/* 페이지 타이틀 */}
                 <div className="mx-auto w-full max-w-[1600px] 2xl:max-w-[1920px] px-6 mb-6 flex items-center min-h-0">
                     <div className="flex items-baseline gap-2 shrink-0">
-                        <h1 className="text-[18px] font-bold text-[#1F2937] leading-none">
-                            나의 미팅 일정
-                        </h1>
-                        <p className="text-[12px] text-[#98A2B3] leading-none">
-                            현재 미팅 일정을 확인해보세요
-                        </p>
+                        <h1 className="text-[18px] font-bold text-[#1F2937] leading-none">나의 미팅 일정</h1>
+                        <p className="text-[12px] text-[#98A2B3] leading-none">현재 미팅 일정을 확인해보세요</p>
                     </div>
-
-                    {/* 구분선 */}
                     <div className="ml-3 flex-1 h-px bg-gradient-to-r from-[#E5E7EB] via-[#E5E7EB] to-transparent rounded-full" />
                 </div>
 
                 {/* 전체: Subnav + (달력/일정) 한 카드 */}
                 <div className="mx-auto w-full max-w-[1600px] 2xl:max-w-[1920px] px-6 pb-4 flex-1 flex">
                     <div className="flex h-full w-full flex-col overflow-hidden rounded-2xl bg-white shadow-[0_4px_24px_rgba(31,41,55,0.06)] min-h-0">
-                        {/* MeetingSubnav */}
                         <div className="shrink-0">
                             <MeetingSubnav />
                         </div>
@@ -160,9 +200,7 @@ export default function CalendarPage() {
                         <div className="flex-1 min-h-0 px-8 py-6">
                             <div
                                 className={`grid min-h-0 gap-4 ${containerHeightClass}`}
-                                style={{
-                                    gridTemplateColumns: overlay ? "1fr" : `1fr ${panelW}px`,
-                                }}
+                                style={{ gridTemplateColumns: overlay ? "1fr" : `1fr ${panelW}px` }}
                             >
                                 {/* 좌측: 달력 */}
                                 <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl shadow-[0_4px_24px_rgba(31,41,55,0.06)] border border-neutral-200/80">
@@ -196,7 +234,12 @@ export default function CalendarPage() {
 
                                 {/* 우측: DayPanel (데스크탑) */}
                                 {!overlay && (
-                                    <div className="h-full min-h-0 overflow-auto rounded-xl shadow-[0_4px_24px_rgba(31,41,55,0.06)] border border-neutral-200/80">
+                                    <div
+                                        ref={desktopPanelRef}
+                                        className="h-full min-h-0 overflow-auto rounded-xl shadow-[0_4px_24px_rgba(31,41,55,0.06)] border border-neutral-200/80"
+                                        onClick={tryOpenByClick}
+                                        title="리스트에서 항목을 클릭하면 상세로 이동합니다."
+                                    >
                                         <DayPanel
                                             date={selectedDate ?? new Date()}
                                             items={selectedDate ? meetingsOfDayLocal(selectedDate) : []}
@@ -210,15 +253,17 @@ export default function CalendarPage() {
                     </div>
                 </div>
 
-                {/* 좁은 화면: DayPanel 모달 (날짜 클릭 시에만 열림) */}
+                {/* 좁은 화면: DayPanel 모달 */}
                 {overlay && panelOpen && (
                     <>
-                        <div
-                            className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-[1px]"
-                            onClick={handleClosePanel}
-                        />
+                        <div className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-[1px]" onClick={handleClosePanel} />
                         <div className="fixed inset-0 z-[70] flex items-start justify-center px-8 sm:px-10 pt-28">
-                            <div className="relative w-[min(540px,100%)] overflow-hidden rounded-2xl bg-white shadow-[0_12px_40px_rgba(31,41,55,0.18)]">
+                            <div
+                                ref={overlayPanelRef}
+                                className="relative w-[min(540px,100%)] overflow-hidden rounded-2xl bg-white shadow-[0_12px_40px_rgba(31,41,55,0.18)]"
+                                onClick={tryOpenByClick}
+                                title="리스트에서 항목을 클릭하면 상세로 이동합니다."
+                            >
                                 <button
                                     aria-label="close"
                                     onClick={handleClosePanel}
