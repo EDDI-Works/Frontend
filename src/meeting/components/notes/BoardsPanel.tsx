@@ -6,7 +6,43 @@ function parseParticipants(input: string): string[] {
     return Array.from(new Set((input || "").split(/[,\s]+/g).map(s => s.trim()).filter(Boolean)));
 }
 
-type ColumnKey = "done" | "todo" | "note" | "good" | "learned";
+// 키 목록과 타입 가드
+const KNOWN_KEYS = ["done", "todo", "note", "good", "learned"] as const;
+type ColumnKey = typeof KNOWN_KEYS[number];
+function isKnownKey(k: any): k is ColumnKey {
+    return KNOWN_KEYS.includes(k as ColumnKey);
+}
+
+// 서버/템플릿에서 오는 다양한 키에 대한 기본 색 매핑
+const ALIAS_STYLE: Record<string, { badgeClass: string }> = {
+    // KPT
+    keep:    { badgeClass: "bg-[#E3F7D3] text-[#3A6B1E]" }, // 초록
+    problem: { badgeClass: "bg-[#FAD7D8] text-[#9B1C1F]" }, // 빨강
+    try:     { badgeClass: "bg-[#DDEBFF] text-[#2E5AAC]" }, // 파랑
+    // 4Ls
+    liked:     { badgeClass: "bg-[#E3F7D3] text-[#3A6B1E]" }, // 초록
+    learned:   { badgeClass: "bg-[#EAE7FF] text-[#4B3DB8]" }, // 보라
+    lacked:    { badgeClass: "bg-[#FDEFC8] text-[#7A5B17]" }, // 노랑
+    longedfor: { badgeClass: "bg-[#FDE6F3] text-[#9A1F60]" }, // 분홍
+    // standup
+    blocker: { badgeClass: "bg-[#FAD7D8] text-[#9B1C1F]" }, // 빨강
+};
+
+// 문자열 정규화
+function norm(s: any) { return String(s || "").toLowerCase().replace(/\s+/g, ""); }
+
+// key 기반 색 찾기
+function aliasBadgeForKey(key: any): string | null {
+    const k = norm(key);
+    return ALIAS_STYLE[k]?.badgeClass ?? null;
+}
+
+// label 기반 색 찾기 (Keep/Problem/Try 같은 라벨만 넘어온 경우)
+function aliasBadgeForLabel(label: any): string | null {
+    const k = norm(label);
+    return ALIAS_STYLE[k]?.badgeClass ?? null;
+}
+
 type Item = { id: string; content: string; createdAt: number; };
 type ColumnUser = { id: string; name: string; items: Item[] };
 type Column = { id: string; key: ColumnKey; label: string; users: ColumnUser[]; badgeClass?: string };
@@ -38,15 +74,20 @@ function pickPaletteForLabel(label: string) {
     return pool[h % pool.length];
 }
 
-// [NEW] canPersistBoards: 서버 publicId 확정 시에만 서버와 통신
+// 안전 스타일 반환 (모르는 키 → note)
+function getStyleForKey(k: any) {
+    return COLUMN_STYLE[isKnownKey(k) ? k : "note"];
+}
+
+// canPersistBoards: 서버 publicId 확정 시에만 서버와 통신
 export default function BoardsPanel({
                                         publicId,
                                         participantsStr,
-                                        canPersistBoards = false,         // [NEW]
+                                        canPersistBoards = false,
                                     }: {
     publicId: string;
     participantsStr: string;
-    canPersistBoards?: boolean;      // [NEW]
+    canPersistBoards?: boolean;
 }) {
     const participants = useMemo(() => parseParticipants(participantsStr), [participantsStr]);
 
@@ -73,8 +114,8 @@ export default function BoardsPanel({
     useEffect(() => {
         let alive = true;
         (async () => {
-            if (!publicId || publicId === "new") return; // [NEW]
-            if (!canPersistBoards) return;               // [NEW]
+            if (!publicId || publicId === "new") return;
+            if (!canPersistBoards) return;
 
             try {
                 const prev = localStorage.getItem(etagKey) || undefined;
@@ -92,21 +133,30 @@ export default function BoardsPanel({
                         templateIdRef.current = boardSnapshot.template ?? null;
                         setTemplateTitle(boardSnapshot.title ?? "");
 
-                        const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => ({
-                            id: c.id || `c${i + 1}`,
-                            key: c.key,
-                            label: c.label,
-                            users: (c.users ?? []).map((u: any) => ({
-                                id: u.id || genId(),
-                                name: u.name,
-                                items: (u.items ?? []).map((it: any) => ({
-                                    id: it.id || genId(),
-                                    content: it.content,
-                                    createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                        // key를 안전하게 정규화
+                        const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => {
+                            const safeKey: ColumnKey = isKnownKey(c.key) ? c.key : "note";
+                            const badgeFromKey   = aliasBadgeForKey(c.key);
+                            const badgeFromLabel = aliasBadgeForLabel(c.label);
+                            return {
+                                id: c.id || `c${i + 1}`,
+                                key: safeKey,
+                                label: (c.label ?? getStyleForKey(safeKey).label).trim(),
+                                users: (c.users ?? []).map((u: any) => ({
+                                    id: u.id || genId(),
+                                    name: u.name,
+                                    items: (u.items ?? []).map((it: any) => ({
+                                        id: it.id || genId(),
+                                        content: it.content,
+                                        createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                                    })),
                                 })),
-                            })),
-                            ...(c.badgeClass ? { badgeClass: c.badgeClass } : {}),
-                        }));
+                                badgeClass: c.badgeClass
+                                    ?? badgeFromKey
+                                    ?? badgeFromLabel
+                                    ?? getStyleForKey(safeKey).badgeClass,
+                            };
+                        });
                         setColumns(cols);
                         setOpenUsers({});
                     }
@@ -123,7 +173,7 @@ export default function BoardsPanel({
         })();
         return () => { alive = false; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [publicId, canPersistBoards]); // [CHANGED]
+    }, [publicId, canPersistBoards]);
 
     // boards:init → 로컬 상태 초기화
     useEffect(() => {
@@ -131,28 +181,37 @@ export default function BoardsPanel({
             const detail = e?.detail as {
                 template?: string;
                 title?: string;
-                columns: Array<{ id?: string; key: ColumnKey; label?: string; badgeClass?: string; users?: any[] }>;
+                columns: Array<{ id?: string; key: any; label?: string; badgeClass?: string; users?: any[] }>;
             };
             if (!detail) return;
 
             templateIdRef.current = detail.template ?? null;
             setTemplateTitle(detail.title || "");
 
-            const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => ({
-                id: id || `c${i + 1}`,
-                key,
-                label: (label ?? COLUMN_STYLE[key].label).trim(),
-                users: (users ?? []).map((u: any) => ({
-                    id: u.id || genId(),
-                    name: u.name,
-                    items: (u.items ?? []).map((it: any) => ({
-                        id: it.id || genId(),
-                        content: it.content,
-                        createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+            // key 안전 정규화
+            const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => {
+                const safeKey: ColumnKey = isKnownKey(key) ? key : "note";
+                const badgeFromKey   = aliasBadgeForKey(key);
+                const badgeFromLabel = aliasBadgeForLabel(label);
+                return {
+                    id: id || `c${i + 1}`,
+                    key: safeKey,
+                    label: (label ?? getStyleForKey(safeKey).label).trim(),
+                    users: (users ?? []).map((u: any) => ({
+                        id: u.id || genId(),
+                        name: u.name,
+                        items: (u.items ?? []).map((it: any) => ({
+                            id: it.id || genId(),
+                            content: it.content,
+                            createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                        })),
                     })),
-                })),
-                ...(badgeClass ? { badgeClass } : {}),
-            }));
+                    badgeClass: badgeClass
+                        ?? badgeFromKey
+                        ?? badgeFromLabel
+                        ?? getStyleForKey(safeKey).badgeClass,
+                };
+            });
 
             setColumns(cols);
             setOpenUsers({});
@@ -240,9 +299,8 @@ export default function BoardsPanel({
 
     // 서버 업서트: canPersistBoards=true일 때만 PUT
     useEffect(() => {
-        if (!publicId || publicId === "new") return; // [NEW]
-        if (!canPersistBoards) return;               // [NEW]
-
+        if (!publicId || publicId === "new") return;
+        if (!canPersistBoards) return;
         const t = window.setTimeout(async () => {
             try {
                 const snapshot = {
@@ -338,7 +396,7 @@ export default function BoardsPanel({
     );
 }
 
-/* ================= 하위 컴포넌트 (그대로) ================= */
+/*  하위 컴포넌트 (그대로, 단 안전 폴백만 보강) */
 
 function ColumnCard({
                         data, onRemove, onUpdate, openUsers, onToggleUser, onUpdateUserItems,
@@ -351,7 +409,7 @@ function ColumnCard({
     onToggleUser: (userName: string) => void;
     onUpdateUserItems: (colId: string, userName: string, next: Item[]) => void;
 }) {
-    const fallback = COLUMN_STYLE[data.key];
+    const fallback = getStyleForKey(data.key);
     const badgeClass = data.badgeClass ?? fallback.badgeClass;
     const total = data.users.reduce((acc, u) => acc + u.items.length, 0);
 
@@ -453,10 +511,10 @@ function ColumnCard({
                                         onClick={() => { onUpdate({ badgeClass: `${p.bg} ${p.text}` }); setMenuOpen(false); }}
                                         className={`flex w-full items-center justify-between rounded px-2 py-1 text-left hover:bg-[#F8FAFC] ${selected ? "bg-[#F5F7FF]" : ""}`}
                                     >
-                    <span className="flex items-center gap-2">
-                      <span className={`inline-block h-3 w-3 rounded-sm ${p.bg}`} />
-                      <span className={`rounded px-2 py-[2px] text-[12px] ${p.bg} ${p.text}`}>{p.label}</span>
-                    </span>
+                                        <span className="flex items-center gap-2">
+                                            <span className={`inline-block h-3 w-3 rounded-sm ${p.bg}`} />
+                                            <span className={`rounded px-2 py-[2px] text-[12px] ${p.bg} ${p.text}`}>{p.label}</span>
+                                        </span>
                                         {selected && <span className="text-[12px] text-[#64748B]">✓</span>}
                                     </button>
                                 );
@@ -614,12 +672,12 @@ function UserSection({
                 <button type="button" onClick={onToggle} className="flex items-center gap-2">
                     <span className="text-[12px] text-[#64748B]">{isOpen ? "▾" : "▸"}</span>
                     <span className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
-              {data.name[0]}
-            </span>
-            <span className="text-[13px] text-[#111827]">{data.name}</span>
-            <span className="text-[12px] text-[#9CA3AF]">{count}</span>
-          </span>
+                        <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
+                            {data.name[0]}
+                        </span>
+                        <span className="text-[13px] text-[#111827]">{data.name}</span>
+                        <span className="text-[12px] text-[#9CA3AF]">{count}</span>
+                    </span>
                 </button>
                 <button
                     type="button"
@@ -738,9 +796,7 @@ function AddUserRow({
     );
 }
 
-/* ───────────────────────────────────────────────────────────
-   length 안전 체크
-─────────────────────────────────────────────────────────── */
+// length 안전 체크
 function colsLength(boardSnapshot: any): number {
     return Array.isArray(boardSnapshot?.columns) ? boardSnapshot.columns.length : 0;
 }
