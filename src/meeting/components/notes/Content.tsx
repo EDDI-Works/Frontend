@@ -18,7 +18,7 @@ type Props = {
 
     participants: string;
 
-    canPersistBoards?: boolean; // [NEW] 서버에 존재 확인(200)된 경우에만 보드 API 호출 허용
+    canPersistBoards?: boolean; // 서버에 존재 확인(200)된 경우에만 보드 API 호출 허용
 };
 
 export default function Content({
@@ -28,7 +28,7 @@ export default function Content({
                                     links, setLinks,
                                     linkOpen, setLinkOpen,
                                     participants,
-                                    canPersistBoards = false, // [NEW] 기본값: 호출 차단
+                                    canPersistBoards = false,
                                 }: Props) {
 
     // 참가자 파싱(유지)
@@ -131,6 +131,11 @@ export default function Content({
         })();
     }
 
+    // ===== 노트 입력 핸들러 (그대로 저장; 빈 문자열 포함) =====
+    const handleNotesChange = (v: string) => {
+        setNotes(v);
+    };
+
     return (
         <div className="space-y-6">
             {/* 제목 */}
@@ -156,7 +161,7 @@ export default function Content({
             <div>
                 <MarkdownEditor
                     value={notes}
-                    onChange={setNotes}
+                    onChange={handleNotesChange}
                     placeholder="빈 화면에 바로 작성하세요. (# 제목, - 목록, **굵게** 등)"
                 />
             </div>

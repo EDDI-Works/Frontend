@@ -107,6 +107,19 @@ export const meetingApi = {
         const response = await axiosInstance.patch(`/meeting/${publicId}`, data);
         return response.data as UpdateMeetingResponse;
     },
+    // 회의 삭제
+    deleteMeeting: async (
+        publicId: string,
+        opts?: { ifMatch?: number | string }
+    ): Promise<void> => {
+        const headers: Record<string, string> = {};
+        if (opts?.ifMatch !== undefined && opts?.ifMatch !== null) {
+            const v = typeof opts.ifMatch === 'string' ? opts.ifMatch : String(opts.ifMatch);
+            headers['If-Match'] = /^".*"$/.test(v) ? v : `"${v}"`;
+        }
+        await axiosInstance.delete(`/meeting/${publicId}`, { headers });
+        // 204 No Content 이므로 반환 바디 없음
+    },
 
     // 회의 단건 조회
     getMeetingDetail: async (publicId: string): Promise<ReadMeetingResponse> => {
