@@ -1,11 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { meetingApi } from "../../../api/meetingApi";
 
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function parseParticipants(input: string): string[] {
     return Array.from(new Set((input || "").split(/[,\s]+/g).map(s => s.trim()).filter(Boolean)));
 }
 
-type ColumnKey = "done" | "todo" | "note" | "good" | "learned";
+// 키 목록과 타입 가드
+const KNOWN_KEYS = ["done", "todo", "note", "good", "learned"] as const;
+type ColumnKey = typeof KNOWN_KEYS[number];
+function isKnownKey(k: any): k is ColumnKey {
+    return KNOWN_KEYS.includes(k as ColumnKey);
+}
+
+// 서버/템플릿에서 오는 다양한 키에 대한 기본 색 매핑
+const ALIAS_STYLE: Record<string, { badgeClass: string }> = {
+    // KPT
+    keep:    { badgeClass: "bg-[#E3F7D3] text-[#3A6B1E]" }, // 초록
+    problem: { badgeClass: "bg-[#FAD7D8] text-[#9B1C1F]" }, // 빨강
+    try:     { badgeClass: "bg-[#DDEBFF] text-[#2E5AAC]" }, // 파랑
+    // 4Ls
+    liked:     { badgeClass: "bg-[#E3F7D3] text-[#3A6B1E]" }, // 초록
+    learned:   { badgeClass: "bg-[#EAE7FF] text-[#4B3DB8]" }, // 보라
+    lacked:    { badgeClass: "bg-[#FDEFC8] text-[#7A5B17]" }, // 노랑
+    longedfor: { badgeClass: "bg-[#FDE6F3] text-[#9A1F60]" }, // 분홍
+    // standup
+    blocker: { badgeClass: "bg-[#FAD7D8] text-[#9B1C1F]" }, // 빨강
+};
+
+// 문자열 정규화
+function norm(s: any) { return String(s || "").toLowerCase().replace(/\s+/g, ""); }
+
+// key 기반 색 찾기
+function aliasBadgeForKey(key: any): string | null {
+    const k = norm(key);
+    return ALIAS_STYLE[k]?.badgeClass ?? null;
+}
+
+// label 기반 색 찾기 (Keep/Problem/Try 같은 라벨만 넘어온 경우)
+function aliasBadgeForLabel(label: any): string | null {
+    const k = norm(label);
+    return ALIAS_STYLE[k]?.badgeClass ?? null;
+}
+
 type Item = { id: string; content: string; createdAt: number; };
 type ColumnUser = { id: string; name: string; items: Item[] };
 type Column = { id: string; key: ColumnKey; label: string; users: ColumnUser[]; badgeClass?: string };
@@ -18,7 +55,6 @@ const COLUMN_STYLE: Record<ColumnKey, { label: string; badgeClass: string }> = {
     learned: { label: "배운 점",    badgeClass: "bg-[#EAE7FF] text-[#4B3DB8]" },
 };
 
-// 색 팔레트
 const COLOR_PALETTE = [
     { id: "gray",   label: "회색",   bg: "bg-[#ECEFF3]", text: "text-[#374151]" },
     { id: "orange", label: "주황색", bg: "bg-[#FFE1C7]", text: "text-[#9A4E10]" },
@@ -38,43 +74,175 @@ function pickPaletteForLabel(label: string) {
     return pool[h % pool.length];
 }
 
-export default function BoardsPanel({ participantsStr }: { participantsStr: string }) {
+// 안전 스타일 반환 (모르는 키 → note)
+function getStyleForKey(k: any) {
+    return COLUMN_STYLE[isKnownKey(k) ? k : "note"];
+}
+
+// canPersistBoards: 서버 publicId 확정 시에만 서버와 통신
+export default function BoardsPanel({
+                                        publicId,
+                                        participantsStr,
+                                        canPersistBoards = false,
+                                        onTemplateTitleChange,
+                                    }: {
+    publicId: string;
+    participantsStr: string;
+    canPersistBoards?: boolean;
+    onTemplateTitleChange?: (title: string) => void;
+}) {
     const participants = useMemo(() => parseParticipants(participantsStr), [participantsStr]);
 
     const [templateTitle, setTemplateTitle] = useState<string>("");
     const [columns, setColumns] = useState<Column[]>([]);
     const [openUsers, setOpenUsers] = useState<Record<string, boolean>>({});
 
-    // 팝오버/프리뷰
+    const templateIdRef = useRef<string | null>(null);
+
     const [addOpen, setAddOpen] = useState(false);
     const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
     const addBtnRef = useRef<HTMLButtonElement | null>(null);
     const [draftLabel, setDraftLabel] = useState<string>("");
+
+    const [boardEtag, setBoardEtag] = useState<string | null>(null);
+    const etagKey = `boardEtag:${publicId}`;
+
+    function propagateTitle(nextTitle: string) {
+        const title = (nextTitle || "").trim();
+        if (!title) return;
+        if (typeof onTemplateTitleChange === "function") {
+            onTemplateTitleChange(title);
+        } else {
+            try {
+                window.dispatchEvent(new CustomEvent("meeting:title:set", { detail: { title } }));
+            } catch {}
+        }
+    }
+
+    useEffect(() => {
+        const t = (templateTitle || "").trim();
+        if (t) propagateTitle(t);
+    }, [templateTitle]);
 
     // 템플릿 표시/숨김 이벤트
     useEffect(() => {
         try { window.dispatchEvent(new Event(columns.length > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
     }, [columns]);
 
+    // 초기 로드: 서버 보드 스냅샷 GET (canPersistBoards=true일 때만)
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            if (!publicId || publicId === "new") return;
+            if (!canPersistBoards) return;
+
+            try {
+                const prev = localStorage.getItem(etagKey) || undefined;
+                const res = await meetingApi.getMeetingBoard(publicId, prev); // 200 or 304
+                if (!alive) return;
+
+                if (res?.status === 304) {
+                    setBoardEtag(prev ?? null);
+                    return;
+                }
+                if (res?.status === 200 && res.data) {
+                    const { boardSnapshot, updatedAt } = res.data as any;
+
+                    if (boardSnapshot) {
+                        templateIdRef.current = boardSnapshot.template ?? null;
+                        const loadedTitle = boardSnapshot.title ?? "";
+                        setTemplateTitle(loadedTitle);
+                        propagateTitle(loadedTitle); // 로드 시 회의 제목에도 반영
+
+                        // key를 안전하게 정규화
+                        const cols: Column[] = (boardSnapshot.columns ?? []).map((c: any, i: number) => {
+                            const safeKey: ColumnKey = isKnownKey(c.key) ? c.key : "note";
+                            const badgeFromKey   = aliasBadgeForKey(c.key);
+                            const badgeFromLabel = aliasBadgeForLabel(c.label);
+                            return {
+                                id: c.id || `c${i + 1}`,
+                                key: safeKey,
+                                label: (c.label ?? getStyleForKey(safeKey).label).trim(),
+                                users: (c.users ?? []).map((u: any) => ({
+                                    id: u.id || genId(),
+                                    name: u.name,
+                                    items: (u.items ?? []).map((it: any) => ({
+                                        id: it.id || genId(),
+                                        content: it.content,
+                                        createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                                    })),
+                                })),
+                                badgeClass: c.badgeClass
+                                    ?? badgeFromKey
+                                    ?? badgeFromLabel
+                                    ?? getStyleForKey(safeKey).badgeClass,
+                            };
+                        });
+                        setColumns(cols);
+                        setOpenUsers({});
+                    }
+
+                    const et = res.headers?.etag || updatedAt || null;
+                    setBoardEtag(et);
+                    if (et) localStorage.setItem(etagKey, et);
+
+                    try { window.dispatchEvent(new Event(colsLength(boardSnapshot) > 0 ? "boards:nonempty" : "boards:empty")); } catch {}
+                }
+            } catch {
+                // 조용히 패스
+            }
+        })();
+        return () => { alive = false; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [publicId, canPersistBoards]);
+
+    // boards:init → 로컬 상태 초기화
     useEffect(() => {
         function onInit(e: any) {
-            const detail = e?.detail as { title?: string; columns: Array<{ key: ColumnKey; label?: string }> };
+            const detail = e?.detail as {
+                template?: string;
+                title?: string;
+                columns: Array<{ id?: string; key: any; label?: string; badgeClass?: string; users?: any[] }>;
+            };
             if (!detail) return;
 
-            setTemplateTitle(detail.title || "");
-            const cols: Column[] = (detail.columns || []).map(({ key, label }) => ({
-                id: genId(),
-                key,
-                label: label ?? COLUMN_STYLE[key].label,
-                users: [],
-            }));
+            templateIdRef.current = detail.template ?? null;
+            const nextTitle = detail.title || "";
+            setTemplateTitle(nextTitle);
+            propagateTitle(nextTitle);
+
+            // key 안전 정규화
+            const cols: Column[] = (detail.columns || []).map(({ id, key, label, badgeClass, users }, i) => {
+                const safeKey: ColumnKey = isKnownKey(key) ? key : "note";
+                const badgeFromKey   = aliasBadgeForKey(key);
+                const badgeFromLabel = aliasBadgeForLabel(label);
+                return {
+                    id: id || `c${i + 1}`,
+                    key: safeKey,
+                    label: (label ?? getStyleForKey(safeKey).label).trim(),
+                    users: (users ?? []).map((u: any) => ({
+                        id: u.id || genId(),
+                        name: u.name,
+                        items: (u.items ?? []).map((it: any) => ({
+                            id: it.id || genId(),
+                            content: it.content,
+                            createdAt: typeof it.createdAt === "number" ? it.createdAt : Number(it.createdAt) || Date.now(),
+                        })),
+                    })),
+                    badgeClass: badgeClass
+                        ?? badgeFromKey
+                        ?? badgeFromLabel
+                        ?? getStyleForKey(safeKey).badgeClass,
+                };
+            });
+
             setColumns(cols);
             setOpenUsers({});
             try { window.dispatchEvent(new Event("boards:cleared")); } catch {}
         }
         window.addEventListener("boards:init" as any, onInit);
         return () => window.removeEventListener("boards:init" as any, onInit);
-    }, []);
+    }, [onTemplateTitleChange]);
 
     function markEdited() { try { window.dispatchEvent(new Event("boards:edited")); } catch {} }
 
@@ -152,12 +320,50 @@ export default function BoardsPanel({ participantsStr }: { participantsStr: stri
         }
     }
 
+    // 서버 업서트: canPersistBoards=true일 때만 PUT
+    useEffect(() => {
+        if (!publicId || publicId === "new") return;
+        if (!canPersistBoards) return;
+        const t = window.setTimeout(async () => {
+            try {
+                const snapshot = {
+                    template: templateIdRef.current,
+                    title: templateTitle || "",
+                    columns: columns.map(c => ({
+                        id: c.id,
+                        key: c.key,
+                        label: c.label,
+                        badgeClass: c.badgeClass ?? null,
+                        users: c.users.map(u => ({
+                            id: u.id,
+                            name: u.name,
+                            items: u.items.map(it => ({
+                                id: it.id,
+                                content: it.content,
+                                createdAt: it.createdAt,
+                            })),
+                        })),
+                    })),
+                };
+
+                const res = await meetingApi.putMeetingBoard(publicId, { snapshot });
+                const { updatedAt } = res.data as any;
+                const et = res.headers?.etag || updatedAt || null;
+                if (et) {
+                    setBoardEtag(et);
+                    localStorage.setItem(etagKey, et);
+                }
+            } catch {
+                // 다음 편집 시 재시도
+            }
+        }, 600);
+
+        return () => window.clearTimeout(t);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [publicId, canPersistBoards, templateTitle, columns]); // [CHANGED]
+
     return (
         <div className="mt-6">
-            {hasBoards && templateTitle && (
-                <div className="mb-2 text-[15px] font-semibold text-[#111827]">{templateTitle}</div>
-            )}
-
             <div className="flex gap-3 overflow-x-auto rounded-xl bg-[#F7FAFF] p-3">
                 {!hasBoards ? (
                     <>
@@ -209,7 +415,7 @@ export default function BoardsPanel({ participantsStr }: { participantsStr: stri
     );
 }
 
-/* ================= 하위 컴포넌트 ================= */
+/*  하위 컴포넌트 (그대로, 단 안전 폴백만 보강) */
 
 function ColumnCard({
                         data, onRemove, onUpdate, openUsers, onToggleUser, onUpdateUserItems,
@@ -222,11 +428,10 @@ function ColumnCard({
     onToggleUser: (userName: string) => void;
     onUpdateUserItems: (colId: string, userName: string, next: Item[]) => void;
 }) {
-    const fallback = COLUMN_STYLE[data.key];
+    const fallback = getStyleForKey(data.key);
     const badgeClass = data.badgeClass ?? fallback.badgeClass;
     const total = data.users.reduce((acc, u) => acc + u.items.length, 0);
 
-    // ▼▼▼ 라벨/색 편집 팝오버 복구 ▼▼▼
     const [menuOpen, setMenuOpen] = useState(false);
     const [menuX, setMenuX] = useState(0);
     const [menuY, setMenuY] = useState(0);
@@ -239,7 +444,6 @@ function ColumnCard({
         setDraft(data.label);
         setMenuOpen(true);
     }
-    // ▲▲▲ 복구 끝 ▲▲▲
 
     return (
         <div className="w-[360px] flex-none rounded-2xl border border-[#E6ECF4] bg-white">
@@ -247,7 +451,7 @@ function ColumnCard({
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
-                        onClick={openMenu} // [RESTORED] 클릭 시 편집 팝오버
+                        onClick={openMenu}
                         className={`rounded px-2 py-[2px] text-[12px] ${badgeClass}`}
                         title="클릭해서 라벨/색 편집"
                     >
@@ -294,7 +498,6 @@ function ColumnCard({
                 })}
             </div>
 
-            {/* ▼▼▼ 편집 팝오버 UI 복구 ▼▼▼ */}
             {menuOpen && (
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
@@ -317,7 +520,7 @@ function ColumnCard({
                         </button>
 
                         <div className="mb-1 px-1 text-[11px] text-[#6B7280]">색</div>
-                        <div className="max-h-[200px] overflow-auto pr-1">
+                        <div className="max-h:[200px] overflow-auto pr-1">
                             {COLOR_PALETTE.map(p => {
                                 const selected = (`${p.bg} ${p.text}`) === (data.badgeClass ?? "");
                                 return (
@@ -327,10 +530,10 @@ function ColumnCard({
                                         onClick={() => { onUpdate({ badgeClass: `${p.bg} ${p.text}` }); setMenuOpen(false); }}
                                         className={`flex w-full items-center justify-between rounded px-2 py-1 text-left hover:bg-[#F8FAFC] ${selected ? "bg-[#F5F7FF]" : ""}`}
                                     >
-                    <span className="flex items-center gap-2">
-                      <span className={`inline-block h-3 w-3 rounded-sm ${p.bg}`} />
-                      <span className={`rounded px-2 py-[2px] text-[12px] ${p.bg} ${p.text}`}>{p.label}</span>
-                    </span>
+                                        <span className="flex items-center gap-2">
+                                            <span className={`inline-block h-3 w-3 rounded-sm ${p.bg}`} />
+                                            <span className={`rounded px-2 py-[2px] text-[12px] ${p.bg} ${p.text}`}>{p.label}</span>
+                                        </span>
                                         {selected && <span className="text-[12px] text-[#64748B]">✓</span>}
                                     </button>
                                 );
@@ -349,7 +552,6 @@ function ColumnCard({
                     </div>
                 </>
             )}
-            {/* ▲▲▲ 복구 끝 ▲▲▲ */}
         </div>
     );
 }
@@ -385,7 +587,7 @@ function PreviewColumnCard({ label }: { label: string }) {
 
 function AddColumnCard({ onOpen, btnRef }: { onOpen: () => void; btnRef: React.RefObject<HTMLButtonElement> }) {
     return (
-        <div className="w-[220px] flex-none rounded-2xl border-2 border-dashed border-[#D9E2F2] bg-white p-3">
+        <div className="w-[220px] flex-none rounded-2xl border-2 border-dashed border-[#D9E2F2] bg:white p-3">
             <button ref={btnRef} type="button" onClick={onOpen} className="w-full text-left text-[13px] text-[#6482C0]">
                 + 항목 추가
             </button>
@@ -489,14 +691,20 @@ function UserSection({
                 <button type="button" onClick={onToggle} className="flex items-center gap-2">
                     <span className="text-[12px] text-[#64748B]">{isOpen ? "▾" : "▸"}</span>
                     <span className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
-              {data.name[0]}
-            </span>
-            <span className="text-[13px] text-[#111827]">{data.name}</span>
-            <span className="text-[12px] text-[#9CA3AF]">{count}</span>
-          </span>
+                        <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
+                            {data.name[0]}
+                        </span>
+                        <span className="text-[13px] text-[#111827]">{data.name}</span>
+                        <span className="text-[12px] text-[#9CA3AF]">{count}</span>
+                    </span>
                 </button>
-                <button type="button" onClick={onRemove} className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1 text-[12px] text-[#DC2626] hover:bg-[#FFF1F2]">삭제</button>
+                <button
+                    type="button"
+                    onClick={onRemove}
+                    className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1 text-[12px] text-[#DC2626] hover:bg-[#FFF1F2]"
+                >
+                    삭제
+                </button>
             </div>
 
             {isOpen && (
@@ -506,13 +714,23 @@ function UserSection({
                             <div className="whitespace-pre-wrap text-[13px] text-[#111827]">{it.content}</div>
                             <div className="mt-1 flex items-center justify-between">
                                 <div className="text-[11px] text-[#94A3B8]">{new Date(it.createdAt).toLocaleString()}</div>
-                                <button type="button" onClick={() => onRemoveItem(it.id)} className="rounded-md border border-[#EEF2F7] bg-white px-2 py-1 text-[11px] text-[#DC2626] hover:bg-[#FFF1F2]">삭제</button>
+                                <button
+                                    type="button"
+                                    onClick={() => onRemoveItem(it.id)}
+                                    className="rounded-md border border-[#EEF2F7] bg-white px-2 py-1 text-[11px] text-[#DC2626] hover:bg-[#FFF1F2]"
+                                >
+                                    삭제
+                                </button>
                             </div>
                         </div>
                     ))}
 
                     {!adding && (
-                        <button type="button" onClick={() => setAdding(true)} className="w-full rounded-md border-2 border-dashed border-[#D9E2F2] px-3 py-2 text-left text-[13px] text-[#7B91F8]">
+                        <button
+                            type="button"
+                            onClick={() => setAdding(true)}
+                            className="w-full rounded-md border-2 border-dashed border-[#D9E2F2] px-3 py-2 text-left text-[13px] text-[#7B91F8]"
+                        >
                             + 내용 추가
                         </button>
                     )}
@@ -528,8 +746,20 @@ function UserSection({
                                 onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add(); } }}
                             />
                             <div className="flex items-center gap-2">
-                                <button type="button" onClick={add} className="rounded-md bg-[#7B91F8] px-3 py-2 text-[13px] text-white">추가</button>
-                                <button type="button" onClick={() => { setAdding(false); setText(""); }} className="rounded-md border border-[#E5E7EB] bg-white px-3 py-2 text-[13px] hover:bg-[#F8FAFC]">취소</button>
+                                <button
+                                    type="button"
+                                    onClick={add}
+                                    className="rounded-md bg-[#7B91F8] px-3 py-2 text-[13px] text-white"
+                                >
+                                    추가
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { setAdding(false); setText(""); }}
+                                    className="rounded-md border border-[#E5E7EB] bg-white px-3 py-2 text-[13px] hover:bg-[#F8FAFC]"
+                                >
+                                    취소
+                                </button>
                             </div>
                         </div>
                     )}
@@ -539,7 +769,6 @@ function UserSection({
     );
 }
 
-/* 참가자 드롭다운 */
 function AddUserRow({
                         participants = [],
                         onSelect,
@@ -574,7 +803,7 @@ function AddUserRow({
                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 hover:bg-[#F8FAFC]"
                             title={name}
                         >
-                            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg-white text-[12px] text-[#6B7280]">
+                            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E7EB] bg:white text-[12px] text-[#6B7280]">
                                 {name[0]}
                             </div>
                             <div className="text-[13px] text-[#111827]">{name}</div>
@@ -584,4 +813,9 @@ function AddUserRow({
             )}
         </div>
     );
+}
+
+// length 안전 체크
+function colsLength(boardSnapshot: any): number {
+    return Array.isArray(boardSnapshot?.columns) ? boardSnapshot.columns.length : 0;
 }

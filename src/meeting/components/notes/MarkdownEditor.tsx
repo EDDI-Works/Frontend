@@ -11,7 +11,6 @@ type Props = {
 export default function MarkdownEditor({ value, onChange, placeholder }: Props) {
     const [mode, setMode] = React.useState<"edit" | "preview">("edit");
 
-    // [NEW] textarea 자동 높이
     const taRef = React.useRef<HTMLTextAreaElement | null>(null);
     React.useEffect(() => {
         const el = taRef.current;
@@ -63,7 +62,6 @@ export default function MarkdownEditor({ value, onChange, placeholder }: Props) 
             ) : (
                 <div
                     className="min-h-[220px] leading-7 text-[15px]"
-                    // 노션 느낌의 ‘빈 캔버스’ — 배경/테두리 없이 렌더
                     dangerouslySetInnerHTML={{ __html: html }}
                 />
             )}
